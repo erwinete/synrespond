@@ -1,0 +1,205 @@
+# Единый оркестратор платформы (ТЗ, раздел 9).
+# Запуск: cp .env.example .env && docker compose -f docker-compose.production.yml up -d --build
+
+x-gpu-reservation: &gpu-reservation
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  # 1. Модифицированное ядро и UI Open WebUI (форк с интентами, HippoRAG и Ragas)
+  open-webui:
+    build:
+      context: ./open-webui-fork
+      dockerfile: Dockerfile
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - '8080:8080'
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-openwebui}
+      - REDIS_URL=redis://redis:6379/0
+      - VECTOR_DB=qdrant
+      - QDRANT_URI=http://qdrant:6333
+      - ENABLE_RAG_HYBRID_SEARCH=true
+      - RAG_RERANKING_ENGINE=external
+      - RAG_EXTERNAL_RERANKER_URL=http://tei-reranker:80/rerank
+      # Маршрутизация интентов
+      - ENABLE_ENCODER_CLASSIFIER=${ENABLE_ENCODER_CLASSIFIER:-true}
+      - ENCODER_CLASSIFIER_URL=http://encoder-classifier:8001
+      - ENCODER_CLASSIFIER_MODEL_ID=${ENCODER_CLASSIFIER_MODEL_ID:-rubert-intents-v1}
+      # HippoRAG и веса слияния
+      - ENABLE_HIPPORAG=${ENABLE_HIPPORAG:-true}
+      - ENABLE_RAG_QUERY_REWRITING=${ENABLE_RAG_QUERY_REWRITING:-true}
+      - RAG_QUERY_REWRITING_MODEL=${RAG_QUERY_REWRITING_MODEL:-}
+      - RAG_HYBRID_WEIGHT_DENSE=${RAG_HYBRID_WEIGHT_DENSE:-0.4}
+      - RAG_HYBRID_WEIGHT_BM25=${RAG_HYBRID_WEIGHT_BM25:-0.2}
+      - RAG_HYBRID_WEIGHT_HIPPORAG=${RAG_HYBRID_WEIGHT_HIPPORAG:-0.4}
+      # Ragas
+      - ENABLE_RAGAS=${ENABLE_RAGAS:-true}
+      - RAGAS_WORKER_URL=http://ragas-worker:8002
+      - RAGAS_LIVE_SAMPLE_RATE=${RAGAS_LIVE_SAMPLE_RATE:-0.15}
+      - RAGAS_HALLUCINATION_THRESHOLD=${RAGAS_HALLUCINATION_THRESHOLD:-0.7}
+      # Голос: локальные STT/TTS
+      - AUDIO_STT_ENGINE=openai
+      - AUDIO_STT_OPENAI_API_BASE_URL=http://speaches:8000/v1
+      - AUDIO_TTS_ENGINE=openai
+      - AUDIO_TTS_OPENAI_API_BASE_URL=http://speaches:8000/v1
+    volumes:
+      - openwebui_data:/app/backend/data
+    depends_on:
+      - postgres
+      - redis
+      - qdrant
+      - encoder-classifier
+
+  # 2. Микросервис классификации интентов (ONNX энкодеры)
+  encoder-classifier:
+    build:
+      context: ./services/encoder-classifier
+    container_name: encoder-classifier
+    restart: unless-stopped
+    ports:
+      - '8001:8001'
+    environment:
+      - ONNX_PROVIDERS=${ENCODER_ONNX_PROVIDERS:-auto}
+      - MODELS_DIR=/models
+    volumes:
+      - ./models/encoders:/models
+    <<: *gpu-reservation
+
+  # 3. Воркер оценки качества RAG по фреймворку Ragas
+  ragas-worker:
+    build:
+      context: ./services/ragas-worker
+    container_name: ragas-worker
+    restart: unless-stopped
+    ports:
+      - '8002:8002'
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-openwebui}
+      - REDIS_URL=redis://redis:6379/1
+      - JUDGE_LLM_URL=${VLLM_BASE_URL:-http://vllm-server:8000/v1}
+      - JUDGE_LLM_MODEL=${RAGAS_JUDGE_MODEL:-Qwen/Qwen2.5-32B-Instruct-AWQ}
+      - EMBEDDINGS_URL=http://tei-embeddings:80/v1
+      - EMBEDDINGS_MODEL=BAAI/bge-m3
+      - OPEN_WEBUI_URL=http://open-webui:8080
+      - OPEN_WEBUI_TOKEN=${OPEN_WEBUI_SERVICE_TOKEN}
+      - RAGAS_HALLUCINATION_THRESHOLD=${RAGAS_HALLUCINATION_THRESHOLD:-0.7}
+    depends_on:
+      - postgres
+      - redis
+      - open-webui
+
+  # 4. Локальный стриминговый STT (Faster-Whisper) и TTS (Kokoro/Piper)
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cuda
+    container_name: speaches
+    restart: unless-stopped
+    ports:
+      - '8003:8000'
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    <<: *gpu-reservation
+
+  # 5. Шлюз SIP-телефонии: Asterisk AudioSocket / WebSocket -> Open WebUI
+  voice-sip-bridge:
+    build:
+      context: ./services/voice-sip-bridge
+    container_name: voice-sip-bridge
+    restart: unless-stopped
+    ports:
+      - '8765:8765'
+    environment:
+      - OPEN_WEBUI_URL=http://open-webui:8080
+      - OPEN_WEBUI_TOKEN=${OPEN_WEBUI_SERVICE_TOKEN}
+      - VOICE_CHAT_MODEL=${VOICE_CHAT_MODEL:-support-voice-bot}
+      - SPEACHES_URL=http://speaches:8000/v1
+      - VOICE_STT_MODEL=${VOICE_STT_MODEL:-faster-whisper-large-v3-turbo}
+      - VOICE_TTS_MODEL=${VOICE_TTS_MODEL:-kokoro}
+    depends_on:
+      - open-webui
+      - speaches
+
+  # 6. Рантайм pipelines: inlet-фильтр маршрутизации как альтернатива нативным хукам
+  pipelines:
+    image: ghcr.io/open-webui/pipelines:main
+    container_name: pipelines
+    restart: unless-stopped
+    ports:
+      - '9099:9099'
+    environment:
+      - ENCODER_CLASSIFIER_URL=http://encoder-classifier:8001
+      - INTENT_MODEL_ID=${ENCODER_CLASSIFIER_MODEL_ID:-rubert-intents-v1}
+    volumes:
+      - ./pipelines-custom:/app/pipelines
+      - pipelines_data:/app/pipelines/data
+
+  # 7. Сервер эмбеддингов (BGE-M3: Dense Search + узлы HippoRAG)
+  tei-embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:1.5
+    container_name: tei-embeddings
+    restart: unless-stopped
+    command: --model-id BAAI/bge-m3 --max-client-batch-size 64
+    volumes:
+      - hf_cache:/data
+    <<: *gpu-reservation
+
+  # 8. Cross-Encoder реранкер (BGE-Reranker-v2-m3)
+  tei-reranker:
+    image: ghcr.io/huggingface/text-embeddings-inference:1.5
+    container_name: tei-reranker
+    restart: unless-stopped
+    command: --model-id BAAI/bge-reranker-v2-m3
+    volumes:
+      - hf_cache:/data
+    <<: *gpu-reservation
+
+  # 9. LLM-сервер: генерация ответов, судья Ragas, OpenIE для HippoRAG
+  vllm-server:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-server
+    restart: unless-stopped
+    command: --model ${LLM_MODEL:-Qwen/Qwen2.5-14B-Instruct} --max-model-len 16384
+    environment:
+      - HF_HOME=/cache
+    ports:
+      - '8000:8000'
+    volumes:
+      - hf_cache:/cache
+    <<: *gpu-reservation
+
+  # 10. Хранилища данных
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-openwebui}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+
+volumes:
+  openwebui_data:
+  pipelines_data:
+  pg_data:
+  qdrant_data:
+  hf_cache:

@@ -1,0 +1,11 @@
+{
+  "task": "feature_extraction",
+  "labels": {},
+  "max_length": 512,
+  "thresholds": {
+    "high": 0.85,
+    "low": 0.5
+  },
+  "source_model": "cointegrated/rubert-tiny2",
+  "zero_shot_mode": "embedding"
+}

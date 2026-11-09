@@ -1,0 +1,23 @@
+# Опциональные зависимости enterprise-платформы.
+# Д7 (Stage 3): включает все пины, найденные при локальном запуске
+# (WORK_REPORT.md, п. 6.2), чтобы чистая установка не ломалась.
+# Ставить на узле, где включены соответствующие подсистемы:
+# pip install -r backend/requirements-enterprise.txt
+
+# Графовый RAG HippoRAG 2 (ENABLE_HIPPORAG)
+hipporag>=2.0,<3.0
+networkx>=3.0
+
+# Конфигурационное хранилище по умолчанию (VECTOR_DB=chroma)
+chromadb>=0.5.0
+
+# Распределенные локи графа и состояния slot-filling
+redis>=5.0.0
+
+# Пины локального запуска на Windows/Python 3.13 (WORK_REPORT п. 6.2):
+audioop-lts>=0.2.1; python_version >= "3.13"
+azure-storage-blob>=12.19.0
+google-cloud-storage>=2.14.0
+# Конфликт с azure/google SDK: требование ядра
+opentelemetry-api==1.42.1
+opentelemetry-sdk==1.42.1

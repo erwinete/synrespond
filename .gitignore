@@ -1,0 +1,30 @@
+# Локальные окружения и кэши — держим на диске F:
+.venv*/
+.venv/
+.cache/
+node_modules/
+.svelte-kit/
+build/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+
+# Форк: артефакты сборки и окружения
+open-webui-fork/node_modules/
+open-webui-fork/.svelte-kit/
+open-webui-fork/build/
+open-webui-fork/.venv*/
+open-webui-fork/backend/data/
+open-webui-fork/.git/
+open-webui-fork/.cache/
+open-webui-fork/backend/__pycache__/
+open-webui-fork/backend/**/__pycache__/
+pipelines/node_modules/
+pipelines/.git/
+
+# ONNX-модели > 100MB — восстанавливаются scripts/bootstrap_models.py
+models/encoders/*/model.onnx
+models/encoders/*/model.int8.onnx
+models/encoders/candidates/
+models/encoders/.train_jobs/

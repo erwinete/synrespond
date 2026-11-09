@@ -1,0 +1,7 @@
+# Опциональные зависимости дообучения энкодера (Active Learning, /v1/train).
+# Устанавливать только на узле, где разрешен файнтюн:
+# pip install -r requirements-train.txt
+torch>=2.2,<2.9  # optimum 1.x несовместим с torch.onnx 2.9+
+optimum[exporters]>=1.20,<2.0
+onnx>=1.16
+scikit-learn>=1.4

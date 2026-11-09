@@ -1,0 +1,15 @@
+{
+  "task": "sequence_classification",
+  "labels": {
+    "0": "greeting",
+    "1": "order_status",
+    "2": "billing_refund",
+    "3": "tech_support"
+  },
+  "max_length": 512,
+  "thresholds": {
+    "high": 0.85,
+    "low": 0.5
+  },
+  "source_model": "cointegrated/rubert-tiny2"
+}

@@ -1,0 +1,27 @@
+{
+  "task": "token_classification",
+  "labels": {
+    "0": "label_0",
+    "1": "label_1",
+    "2": "label_2",
+    "3": "label_3",
+    "4": "label_4",
+    "5": "label_5",
+    "6": "label_6",
+    "7": "label_7",
+    "8": "label_8",
+    "9": "label_9",
+    "10": "label_10",
+    "11": "label_11",
+    "12": "label_12",
+    "13": "label_13",
+    "14": "label_14"
+  },
+  "max_length": 512,
+  "thresholds": {
+    "high": 0.85,
+    "low": 0.5
+  },
+  "source_model": "cointegrated/rubert-tiny2",
+  "aggregation_threshold": 0.6
+}
