@@ -20,7 +20,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -47,6 +47,15 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 RPC_METHODS = ('initialize', 'ping', 'tools/list', 'tools/call', 'resources/list', 'resources/read')
+
+# SEC-01: мутирующие инструменты доступна только роли admin
+MUTATING_TOOLS = {
+    'platform_configure_modules',
+    'bot_apply_behavior_manifest',
+    'intent_upsert_single_route',
+    'encoder_bootstrap_or_train',
+    'knowledge_hipporag_manage',
+}
 
 TOOLS_SPEC: list[dict[str, Any]] = [
     {
@@ -496,7 +505,7 @@ async def _knowledge_manage(args: dict[str, Any], user) -> dict[str, Any]:
                 from fastapi import Request as FastapiRequest
 
                 # Индексация файла в векторное хранилище выполняется отдельным вызовом
-                schedule_hipporag_indexing(None, knowledge.id)
+                await schedule_hipporag_indexing(None, knowledge.id)
         return {'knowledge_id': knowledge.id, 'name': name, 'status': 'text added, indexing scheduled'}
     if action == 'reindex':
         from open_webui.retrieval.hipporag_engine import schedule_hipporag_indexing
@@ -504,7 +513,7 @@ async def _knowledge_manage(args: dict[str, Any], user) -> dict[str, Any]:
         knowledge_id = args.get('knowledge_id')
         if not knowledge_id:
             raise ValueError('knowledge_id is required')
-        schedule_hipporag_indexing(None, knowledge_id)
+        await schedule_hipporag_indexing(None, knowledge_id)
         return {'knowledge_id': knowledge_id, 'status': 'reindex scheduled'}
     if action == 'query':
         from open_webui.retrieval.hipporag_engine import get_hipporag_adapter
@@ -543,6 +552,12 @@ async def _create_text_file(user, name: str, text: str):
 
 
 async def _dispatch_tool(name: str, args: dict[str, Any], user) -> dict[str, Any]:
+    # SEC-01: вертикальная эскалация закрыта — мутации ядра только для админа
+    if name in MUTATING_TOOLS and getattr(user, 'role', None) != 'admin':
+        raise HTTPException(
+            status_code=403,
+            detail='Admin privileges required for mutating MCP tool',
+        )
     if name == 'platform_inspect_status':
         return await _tool_platform_insight(args)
     if name == 'platform_configure_modules':
@@ -654,6 +669,8 @@ async def _handle_single(body: dict[str, Any], user) -> dict[str, Any]:
         return _rpc_error(rpc_id, -32601, f'Method not found: {method}')
     except ValueError as exc:
         return _rpc_error(rpc_id, -32602, str(exc))
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         log.exception('MCP tool execution failed')
         return _rpc_error(rpc_id, -32603, f'Internal error: {exc}')

@@ -1678,12 +1678,15 @@ async def chat_completion(
                     if mapping:
 
                         async def unmask_stream():
-                            from open_webui.utils.pii_vault import StreamingPIIUnmasker
+                            from open_webui.utils.pii_vault import (
+                                StreamingPIIUnmasker,
+                                unmask_sse_stream_chunk,
+                            )
 
                             unmasker = StreamingPIIUnmasker(mapping)
                             async for chunk in response.body_iterator:
                                 text = chunk.decode('utf-8', 'replace') if isinstance(chunk, bytes) else chunk
-                                yield unmasker.feed(text)
+                                yield unmask_sse_stream_chunk(text, unmasker)
                             tail = unmasker.flush()
                             if tail:
                                 yield tail

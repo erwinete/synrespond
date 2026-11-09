@@ -1539,7 +1539,7 @@ async def add_file_to_knowledge_by_id(
             user=user,
             db=db,
         )
-        schedule_hipporag_indexing(request, id)
+        await schedule_hipporag_indexing(request, id)
     except Exception as e:
         if linked:
             await Knowledges.remove_file_from_knowledge_by_id(id, form_data.file_id, db=db)
@@ -1627,7 +1627,7 @@ async def update_file_from_knowledge_by_id(
             user=user,
             db=db,
         )
-        schedule_hipporag_indexing(request, id)
+        await schedule_hipporag_indexing(request, id)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1712,7 +1712,7 @@ async def remove_file_from_knowledge_by_id(
         await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'file_id': form_data.file_id})
         if file.hash:
             await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'hash': file.hash})
-        schedule_hipporag_indexing(request, knowledge.id)
+        await schedule_hipporag_indexing(request, knowledge.id)
     except Exception as e:
         log.debug('This was most likely caused by bypassing embedding processing')
         log.debug(e)
@@ -2226,7 +2226,7 @@ async def add_files_to_knowledge_batch(
     for file_id in set(reserved_ids) - set(successful_file_ids):
         await Knowledges.remove_file_from_knowledge_by_id(id, file_id, db=db)
     if successful_file_ids:
-        schedule_hipporag_indexing(request, id)
+        await schedule_hipporag_indexing(request, id)
 
     # If there were any errors, include them in the response
     if result.errors:

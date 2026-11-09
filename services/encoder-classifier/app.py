@@ -24,6 +24,7 @@ from engine import (
     TASK_SEQUENCE,
     TASK_TOKEN,
     TASK_ZERO_SHOT,
+    InvalidModelId,
     ModelRegistry,
     resolve_providers,
 )
@@ -43,6 +44,8 @@ from schemas import (
     HealthResponse,
     ModelsListResponse,
     ModelInfo,
+    PipelineAnalyzeRequest,
+    PipelineAnalyzeResponse,
     ReloadResponse,
     SlotSpan,
     TrainJobResponse,
@@ -65,6 +68,14 @@ app = FastAPI(
 
 registry = ModelRegistry()
 _providers = resolve_providers()
+
+
+@app.exception_handler(InvalidModelId)
+async def invalid_model_id_handler(request, exc: InvalidModelId):
+    # SEC-03 / DoD: traversal или недопустимые символы в model_id -> HTTP 400
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(status_code=400, detail=str(exc))
 
 
 def _device_label() -> str:
@@ -233,6 +244,8 @@ async def zero_shot(req: ZeroShotRequest) -> ClassifyResponse:
 @app.post("/v1/extract-slots", response_model=ExtractSlotsResponse)
 async def extract_slots(req: ExtractSlotsRequest) -> ExtractSlotsResponse:
     t0 = time.perf_counter()
+    if not req.text and not req.texts:
+        raise HTTPException(status_code=400, detail="Field 'text' or 'texts' is required")
     try:
         artifact = registry.get(req.model_id)
     except FileNotFoundError as exc:
@@ -241,6 +254,24 @@ async def extract_slots(req: ExtractSlotsRequest) -> ExtractSlotsResponse:
         raise HTTPException(status_code=400, detail=f"Model {req.model_id} is {artifact.task}, не token_classification")
 
     threshold = float(artifact.meta.get("aggregation_threshold", 0.6))
+
+    if req.texts:
+        # BUG-06: батч-режим — один прогон ONNX на весь список текстов
+        try:
+            batch = await run_in_threadpool(artifact.extract_spans_batch, req.texts, threshold)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"Inference failed: {exc}")
+        merged_batch = []
+        for text, spans in zip(req.texts, batch):
+            regex_spans = slots_extractor.extract_pattern_spans(text)
+            merged_batch.append(slots_extractor.merge_spans(spans, regex_spans))
+        latency = (time.perf_counter() - t0) * 1000
+        return ExtractSlotsResponse(
+            spans=[],
+            batch_spans=[[SlotSpan(**s) for s in spans] for spans in merged_batch],
+            latency_ms=round(latency, 2),
+        )
+
     try:
         spans = await run_in_threadpool(artifact.extract_spans, req.text, threshold)
     except Exception as exc:  # noqa: BLE001
@@ -289,6 +320,65 @@ async def guard(req: GuardRequest) -> GuardResponse:
     """Ф5: детекция промпт-инъекций и джейлбрейков."""
     result = await detect_injection(registry, req.text, req.threshold)
     return GuardResponse(**result)
+
+
+@app.post("/v1/pipeline-analyze", response_model=PipelineAnalyzeResponse)
+async def pipeline_analyze(req: PipelineAnalyzeRequest) -> PipelineAnalyzeResponse:
+    """ARCH-01: guard + classify + extract-slots за один HTTP-вызов (8-15 мс).
+
+    Единый вход для ядра вместо трех последовательных запросов. Ошибка
+    любого контура не валит весь пайплайн: контур возвращается как None/[].
+    """
+    import asyncio
+
+    t0 = time.perf_counter()
+
+    async def _guard() -> Optional[GuardResponse]:
+        try:
+            result = await detect_injection(registry, req.text, req.guard_threshold)
+            return GuardResponse(**result)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Pipeline guard stage failed: %s", exc)
+            return None
+
+    async def _classify() -> Optional[ClassifyResponse]:
+        try:
+            return await run_in_threadpool(
+                _classify_one,
+                ClassifyRequest(
+                    text=req.text,
+                    model_id=req.model_id,
+                    temperature=req.temperature,
+                    tau_high=req.tau_high,
+                    tau_low=req.tau_low,
+                ),
+            )
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                return None  # модель не найдена — ядро уйдет в fallback
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Pipeline classify stage failed: %s", exc)
+            return None
+
+    async def _slots() -> list[SlotSpan]:
+        if not req.slot_model_id:
+            return []
+        try:
+            result = await extract_slots(
+                ExtractSlotsRequest(text=req.text, model_id=req.slot_model_id)
+            )
+            return result.spans
+        except Exception:  # noqa: BLE001
+            return []
+
+    guard_result, classification, spans = await asyncio.gather(_guard(), _classify(), _slots())
+    return PipelineAnalyzeResponse(
+        guard=guard_result,
+        classification=classification,
+        slots=spans,
+        latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+    )
 
 
 @app.post("/v1/train", response_model=TrainJobResponse, status_code=202)

@@ -5,6 +5,10 @@
 
 	import { getKnowledgeGraph, testKnowledgeGraphQuery, getGraphReasoningPath } from '$lib/apis/classifiers';
 
+	import SynIcon from '../../synrespond/SynIcon.svelte';
+	import SynEmoji from '../../synrespond/SynEmoji.svelte';
+	import '../../synrespond/synrespond-tokens.css';
+
 	const i18n: any = getContext('i18n');
 
 	export let collectionId: string;
@@ -83,15 +87,24 @@
 	onMount(loadGraph);
 </script>
 
-<div class="flex flex-col gap-3">
+<div class="syn-studio flex flex-col gap-3">
 	{#if loading}
-		<div class="py-10 text-center text-sm text-gray-400">{$i18n.t('Loading graph...')}</div>
+		<div class="flex flex-col items-center justify-center py-12 gap-3">
+			<SynEmoji mood="focused" size={40} />
+			<div class="text-xs text-[var(--syn-text-tertiary)]">{$i18n.t('Loading graph...')}</div>
+		</div>
 	{:else if nodeCount === 0}
-		<div class="py-10 text-center text-sm text-gray-400">
-			{$i18n.t('Knowledge graph is not built yet for this collection.')}
+		<div class="syn-color-block syn-block-emerald py-10 text-center space-y-2">
+			<SynEmoji mood="curious" size={36} animated={false} />
+			<div class="text-sm font-medium">{$i18n.t('Knowledge graph is not built yet for this collection.')}</div>
+			<p class="text-xs text-[var(--syn-text-tertiary)]">
+				{$i18n.t('Upload files to build the knowledge graph.')}
+			</p>
 		</div>
 	{:else}
-		<div class="rounded-xl border border-gray-100 dark:border-gray-850 overflow-auto max-h-[420px] bg-white dark:bg-gray-900">
+		<div
+			class="syn-color-block syn-block-emerald overflow-auto max-h-[420px] p-2"
+		>
 			<svg width="100%" height="420" viewBox="0 0 {viewSize} {viewSize}" role="img">
 				{#each graph.edges as edge (edge.source + edge.target + edge.label)}
 					{@const source = positions[edge.source]}
@@ -102,7 +115,8 @@
 							y1={source.y}
 							x2={target.x}
 							y2={target.y}
-							class="stroke-gray-300 dark:stroke-gray-700"
+							class="stroke-[var(--syn-emerald)]"
+							opacity="0.25"
 							stroke-width="0.6"
 						>
 							<title>{edge.label}</title>
@@ -116,13 +130,13 @@
 							cx={pos.x}
 							cy={pos.y}
 							r={node.kind === 'passage' ? 5 : 3.5}
-							class:fill-blue-500={node.kind !== 'passage'}
-							class:fill-gray-400={node.kind === 'passage'}
+							class:fill-[var(--syn-emerald)]={node.kind !== 'passage'}
+							class:fill-[var(--syn-text-muted)]={node.kind === 'passage'}
 						>
 							<title>{node.label}</title>
 						</circle>
 						{#if node.kind !== 'passage' && nodeCount <= 120}
-							<text x={pos.x + 6} y={pos.y + 2} font-size="9" class="fill-gray-500 dark:fill-gray-400">
+							<text x={pos.x + 6} y={pos.y + 2} font-size="9" class="fill-[var(--syn-text-tertiary)]">
 								{node.label.slice(0, 24)}
 							</text>
 						{/if}
@@ -130,35 +144,36 @@
 				{/each}
 			</svg>
 		</div>
-		<div class="text-xs text-gray-400">
+		<div class="text-xs text-[var(--syn-text-tertiary)]">
 			{nodeCount} {$i18n.t('nodes')} · {graph.edges.length} {$i18n.t('edges')} · {$i18n.t('blue: entity, gray: passage')}
 		</div>
 
 		<div class="flex gap-2">
 			<input
-				class="flex-1 text-sm rounded-lg px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-850 outline-none"
+				class="flex-1 text-sm rounded-xl px-3.5 py-2 bg-[var(--syn-bg-surface)] border border-[var(--syn-border-subtle)] outline-none focus:border-[var(--syn-emerald)] transition"
 				placeholder={$i18n.t('Test Personalized PageRank query...')}
 				bind:value={testQuery}
 				on:keydown={(e) => e.key === 'Enter' && runPprTest()}
 			/>
 			<button
-				class="px-3 py-2 text-sm rounded-lg bg-black text-white dark:bg-white dark:text-black disabled:opacity-50"
+				class="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-xl bg-[var(--syn-text-primary)] text-[var(--syn-bg-surface)] hover:opacity-90 disabled:opacity-50 transition"
 				disabled={testing}
 				on:click={runPprTest}
 			>
+				<SynIcon name="search" size={14} />
 				{testing ? $i18n.t('Running...') : $i18n.t('Run PPR')}
 			</button>
 		</div>
 
 		{#if pprResults.length}
-			<div class="rounded-xl border border-gray-100 dark:border-gray-850 divide-y divide-gray-100 dark:divide-gray-850 max-h-64 overflow-y-auto">
+			<div class="syn-color-block divide-y divide-[var(--syn-border-subtle)] max-h-64 overflow-y-auto !py-1">
 				{#each pprResults as result, index}
-					<div class="px-3 py-2 text-xs">
+					<div class="px-2 py-2 text-xs">
 						<div class="flex justify-between font-medium">
 							<span>#{index + 1}</span>
-							<span class="text-gray-400">score: {result.score?.toFixed?.(4) ?? result.score}</span>
+							<span class="font-mono text-[var(--syn-emerald)]">score: {result.score?.toFixed?.(4) ?? result.score}</span>
 						</div>
-						<div class="text-gray-500 dark:text-gray-400 line-clamp-2">{result.text}</div>
+						<div class="text-[var(--syn-text-secondary)] line-clamp-2">{result.text}</div>
 					</div>
 				{/each}
 			</div>
@@ -166,43 +181,44 @@
 
 		<!-- Ф6: Reasoning Path — доказуемая цепочка вывода по графу -->
 		<button
-			class="self-start px-3 py-1.5 text-xs rounded-lg bg-gray-100 dark:bg-gray-800 hover:opacity-80 disabled:opacity-50"
+			class="inline-flex items-center gap-1.5 self-start px-3 py-1.5 text-xs rounded-lg border border-[var(--syn-border-subtle)] bg-[var(--syn-bg-surface)] hover:bg-[var(--syn-bg-elevated)] disabled:opacity-50 transition"
 			disabled={pathLoading}
 			on:click={runReasoningPath}
 		>
+			<SynIcon name="hipporag" size={13} />
 			{pathLoading ? $i18n.t('Tracing...') : $i18n.t('Show Reasoning Path')}
 		</button>
 
 		{#if reasoningPath}
 			{#if reasoningPath.available}
-				<div class="rounded-xl border border-indigo-200 dark:border-indigo-900/60 bg-indigo-50/50 dark:bg-indigo-950/20 p-3">
-					<div class="text-xs font-medium mb-2">{$i18n.t('Reasoning path')}</div>
+				<div class="syn-color-block syn-block-cobalt">
+					<div class="text-xs font-semibold mb-2">{$i18n.t('Reasoning path')}</div>
 					<div class="flex flex-wrap items-center gap-1 text-xs">
 						{#each reasoningPath.steps as step, index}
-							<span class="rounded bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 px-1.5 py-0.5">
+							<span class="rounded-md bg-[var(--syn-bg-surface)] border border-[var(--syn-border-subtle)] px-1.5 py-0.5">
 								{step.from}
 							</span>
 							{#if step.relation}
-								<span class="text-gray-400">—{step.relation}→</span>
+								<span class="text-[var(--syn-cobalt)] font-mono">—{step.relation}→</span>
 							{:else}
-								<span class="text-gray-400">→</span>
+								<span class="text-[var(--syn-cobalt)]">→</span>
 							{/if}
 							{#if index === reasoningPath.steps.length - 1}
-								<span class="rounded bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 px-1.5 py-0.5">
+								<span class="rounded-md bg-[var(--syn-bg-surface)] border border-[var(--syn-border-subtle)] px-1.5 py-0.5">
 									{step.to}
 								</span>
 							{/if}
 						{/each}
 					</div>
 					{#if reasoningPath.evidence}
-						<div class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+						<div class="mt-2 text-xs text-[var(--syn-text-secondary)]">
 							<span class="font-medium">{$i18n.t('Evidence')}:</span>
 							{reasoningPath.evidence.slice(0, 300)}
 						</div>
 					{/if}
 				</div>
 			{:else}
-				<div class="text-xs text-gray-400">
+				<div class="text-xs text-[var(--syn-text-tertiary)]">
 					{$i18n.t('Reasoning path unavailable')}: {reasoningPath.reason}
 				</div>
 			{/if}

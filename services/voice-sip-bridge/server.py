@@ -13,7 +13,7 @@ import asyncio
 import logging
 import os
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 
 from audiosocket import start_audiosocket_server
 from config import AUDIOSOCKET_HOST, AUDIOSOCKET_PORT
@@ -23,6 +23,18 @@ logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
 log = logging.getLogger('voice-sip-bridge')
 
 VERSION = '1.0.0'
+
+# SEC-04: если секрет задан, /ws/audio и /v1/call-status требуют его
+# через заголовок X-Bridge-Secret или query-параметр ?token=
+VOICE_BRIDGE_SECRET = os.getenv('VOICE_BRIDGE_SECRET', '')
+
+
+def _bridge_authorized(websocket: WebSocket) -> bool:
+    if not VOICE_BRIDGE_SECRET:
+        return True
+    provided = websocket.query_params.get('token') or websocket.headers.get('x-bridge-secret') or ''
+    return provided == VOICE_BRIDGE_SECRET
+
 
 app = FastAPI(title='Voice SIP Bridge (Pipecat-based)', version=VERSION)
 
@@ -40,11 +52,19 @@ def make_session(
 
 
 @app.get('/v1/call-status/{call_uuid}')
-async def call_status(call_uuid: str):
+async def call_status(
+    call_uuid: str,
+    token: str = Query(default=''),
+    x_bridge_secret: str = Header(default='', alias='X-Bridge-Secret'),
+):
     """Д5: цель перевода для диалплана Asterisk (CURL после AudioSocket).
 
     Ответ 'NONE' — звонок решен ботом, Hangup; имя очереди — Goto handoff.
+    SEC-04: при заданном VOICE_BRIDGE_SECRET требуется ?token= или
+    заголовок X-Bridge-Secret.
     """
+    if VOICE_BRIDGE_SECRET and token != VOICE_BRIDGE_SECRET and x_bridge_secret != VOICE_BRIDGE_SECRET:
+        raise HTTPException(status_code=403, detail='Unauthorized bridge secret')
     from call_status import get_transfer
 
     queue = await get_transfer(call_uuid)
@@ -64,6 +84,10 @@ async def health():
 async def ws_audio(websocket: WebSocket, sample_rate: int = Query(default=8000)):
     """Двунаправленный аудиопоток: PCM 16-bit mono кадрами по WebSocket."""
     await websocket.accept()
+    if not _bridge_authorized(websocket):
+        await websocket.send_json({'type': 'error', 'detail': 'Unauthorized bridge secret'})
+        await websocket.close(code=4401)
+        return
     session_id = f'ws-{id(websocket)}'
     log.info('WS-сессия %s, sample_rate=%s', session_id, sample_rate)
 

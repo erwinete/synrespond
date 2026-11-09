@@ -173,3 +173,57 @@ def unmask_stream_lines(lines, mapping: dict[str, str]):
     for line in lines:
         yield unmasker.feed(line)
     yield unmasker.flush()
+
+
+def unmask_sse_stream_chunk(raw_chunk: str, unmasker: "StreamingPIIUnmasker") -> str:
+    """Безопасное размаскирование ПДн внутри SSE-стрима OpenAI-формата (исправление BUG-08).
+
+    Парсит строки `data: {...}`, пропускает через StreamingPIIUnmasker только
+    текстовое содержимое delta.content / message.content и собирает обратно
+    валидный SSE-пакет. Структурные скобки JSON ("choices":[{) не попадают
+    в буфер демаскировщика, поэтому SSE-фреймы не задерживаются.
+    """
+    import json
+
+    if not unmasker.mapping or not raw_chunk:
+        return raw_chunk
+
+    out_lines: list[str] = []
+    for line in raw_chunk.splitlines(keepends=True):
+        stripped = line.strip()
+        if not stripped.startswith("data:"):
+            out_lines.append(line)
+            continue
+        payload_str = stripped.removeprefix("data:").strip()
+        if payload_str == "[DONE]" or not payload_str.startswith("{"):
+            if payload_str == "[DONE]":
+                tail = unmasker.flush()
+                if tail:
+                    flush_pkt = {
+                        "id": "pii-flush",
+                        "object": "chat.completion.chunk",
+                        "choices": [{"index": 0, "delta": {"content": tail}, "finish_reason": None}],
+                    }
+                    out_lines.append(f"data: {json.dumps(flush_pkt, ensure_ascii=False)}\n\n")
+            out_lines.append(line)
+            continue
+        try:
+            packet = json.loads(payload_str)
+            changed = False
+            for choice in packet.get("choices") or []:
+                delta = choice.get("delta")
+                if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+                    delta["content"] = unmasker.feed(delta["content"])
+                    changed = True
+                msg = choice.get("message")
+                if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                    msg["content"] = unmasker.feed(msg["content"]) + unmasker.flush()
+                    changed = True
+            if changed:
+                ending = "\n\n" if line.endswith("\n\n") else ("\n" if line.endswith("\n") else "")
+                out_lines.append(f"data: {json.dumps(packet, ensure_ascii=False)}{ending}")
+            else:
+                out_lines.append(line)
+        except json.JSONDecodeError:
+            out_lines.append(line)
+    return "".join(out_lines)

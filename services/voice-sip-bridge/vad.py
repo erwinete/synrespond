@@ -90,6 +90,13 @@ class UtteranceSegmenter:
             return None
         return self._flush()
 
+    def has_active_speech_onset(self) -> bool:
+        """True — речь активна дольше VAD_START_MS (120 мс): триггер мгновенного barge-in.
+
+        BUG-07: прерывание не ждет конца всей фразы абонента и тишины VAD_END_MS.
+        """
+        return self.speaking and (time.monotonic() - self.speech_started_ts) * 1000 >= VAD_START_MS
+
     def _flush(self) -> bytes:
         segment, self.buffer = self.buffer, b''
         return segment

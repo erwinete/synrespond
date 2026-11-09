@@ -70,6 +70,10 @@ def main() -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # BUG-09: токенизатор загружается до блока --init-new-head и доступен
+    # для сохранения во временную папку модели с новой головой
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+
     task_map = {
         "sequence_classification": "text-classification",
         "zero_shot_nli": "text-classification",
@@ -79,26 +83,41 @@ def main() -> None:
     model_cls = AutoModelForTokenClassification if args.task == "token_classification" else AutoModelForSequenceClassification
 
     export_source = args.model
+    tmp_model_dir = None
     if args.init_new_head and args.task in ("sequence_classification", "zero_shot_nli", "token_classification"):
         # Новая голова под переданные метки (для экспорта без совпадения размеров)
+        import shutil
         import tempfile
 
         num_labels = len(resolve_labels(args, None)) or 2
         model = model_cls.from_pretrained(args.model, num_labels=num_labels, ignore_mismatched_sizes=True)
         tmp_model_dir = tempfile.mkdtemp(prefix="hf_head_")
-        model.save_pretrained(tmp_model_dir)
-        tokenizer.save_pretrained(tmp_model_dir) if False else None
-        export_source = tmp_model_dir
-        print(f"Создана новая голова на {num_labels} классов -> экспорт из {tmp_model_dir}")
+        try:
+            model.save_pretrained(tmp_model_dir)
+            tokenizer.save_pretrained(tmp_model_dir)
+            export_source = tmp_model_dir
+            print(f"Создана новая голова на {num_labels} классов -> экспорт из {tmp_model_dir}")
 
-    print(f"Загрузка {args.model} и экспорт в ONNX ({task_map[args.task]})...")
-    main_export(
-        export_source,
-        output=str(out_dir),
-        task=task_map[args.task],
-        opset=17,
-        device="cpu",
-    )
+            print(f"Загрузка {args.model} и экспорт в ONNX ({task_map[args.task]})...")
+            main_export(
+                export_source,
+                output=str(out_dir),
+                task=task_map[args.task],
+                opset=17,
+                device="cpu",
+            )
+        finally:
+            # BUG-09: временная папка не протекает при ошибке экспорта
+            shutil.rmtree(tmp_model_dir, ignore_errors=True)
+    else:
+        print(f"Загрузка {args.model} и экспорт в ONNX ({task_map[args.task]})...")
+        main_export(
+            export_source,
+            output=str(out_dir),
+            task=task_map[args.task],
+            opset=17,
+            device="cpu",
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     tokenizer.save_pretrained(out_dir)

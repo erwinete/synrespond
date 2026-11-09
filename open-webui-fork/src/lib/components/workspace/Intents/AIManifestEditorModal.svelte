@@ -3,6 +3,7 @@
 	import { toast } from 'svelte-sonner';
 
 	import Modal from '$lib/components/common/Modal.svelte';
+	import SynIcon from '../../synrespond/SynIcon.svelte';
 
 	const i18n: any = getContext('i18n');
 
@@ -158,7 +159,10 @@
 		{#if validation}
 			<div class="max-h-40 overflow-y-auto rounded-lg border border-gray-100 p-2 text-xs dark:border-gray-850">
 				{#if validation.valid}
-					<div class="text-green-600">✓ {$i18n.t('Manifest is valid')}</div>
+					<div class="inline-flex items-center gap-1.5 text-[var(--syn-emerald)]">
+						<SynIcon name="check" size={13} />
+						{$i18n.t('Manifest is valid')}
+					</div>
 				{/if}
 				{#each validation.errors ?? [] as item}
 					<div class="mt-1 text-red-500">

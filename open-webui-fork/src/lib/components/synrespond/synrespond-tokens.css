@@ -1,0 +1,194 @@
+/* ==========================================================================
+   SYNRESPOND BESPOKE DESIGN SYSTEM — TOKENS, COLOR BLOCKS & MOTION ENGINE
+   Разработано с нуля специально для архитектуры synrespond.
+   60/30/10: базовое полотно / семантические цветовые блоки модулей / фокус.
+   ========================================================================== */
+
+:root {
+  /* Базовые поверхности (60%) */
+  --syn-bg-canvas: #F6F5F0;
+  --syn-bg-surface: #FFFFFF;
+  --syn-bg-elevated: #EFECE6;
+  --syn-bg-glass: rgba(255, 255, 255, 0.84);
+
+  /* Типографика (4 уровня иерархии) */
+  --syn-text-primary: #141619;
+  --syn-text-secondary: #4A4F55;
+  --syn-text-tertiary: #7A8088;
+  --syn-text-muted: #A0A6AD;
+
+  /* Тонкие 1px границы */
+  --syn-border-subtle: rgba(20, 22, 25, 0.08);
+  --syn-border-strong: rgba(20, 22, 25, 0.16);
+
+  /* Акцентные сигнальные цвета (10%) */
+  --syn-cobalt: #2B5BEE;
+  --syn-cobalt-ink: #1B3A9E;
+  --syn-emerald: #0E9F6E;
+  --syn-emerald-ink: #076646;
+  --syn-amber: #D97706;
+  --syn-amber-ink: #92400E;
+  --syn-coral: #E11D48;
+  --syn-coral-ink: #9F1239;
+  --syn-violet: #6D28D9;
+  --syn-violet-ink: #4C1D95;
+
+  /* Фирменные цветовые блоки модулей (30%) */
+  --syn-block-cobalt: #EEF3FF;
+  --syn-block-cobalt-border: rgba(43, 91, 238, 0.18);
+  --syn-block-emerald: #EAFBF4;
+  --syn-block-emerald-border: rgba(14, 159, 110, 0.20);
+  --syn-block-amber: #FFF7EB;
+  --syn-block-amber-border: rgba(217, 119, 6, 0.22);
+  --syn-block-coral: #FFF0F3;
+  --syn-block-coral-border: rgba(225, 29, 72, 0.18);
+  --syn-block-violet: #F3EEFF;
+  --syn-block-violet-border: rgba(109, 40, 217, 0.18);
+
+  /* Геометрия и радиусы (4px / 8px сетка) */
+  --syn-radius-xs: 6px;
+  --syn-radius-sm: 10px;
+  --syn-radius-md: 14px;
+  --syn-radius-lg: 20px;
+  --syn-radius-pill: 9999px;
+
+  /* Кривые движения (только GPU transform и opacity) */
+  --syn-ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --syn-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --syn-duration-fast: 160ms;
+  --syn-duration-normal: 260ms;
+  --syn-duration-slow: 420ms;
+}
+
+:global(html.dark) {
+  --syn-bg-canvas: #0B0D10;
+  --syn-bg-surface: #12151A;
+  --syn-bg-elevated: #1A1E25;
+  --syn-bg-glass: rgba(18, 21, 26, 0.86);
+
+  --syn-text-primary: #F1F3F5;
+  --syn-text-secondary: #ADB5BD;
+  --syn-text-tertiary: #747C87;
+  --syn-text-muted: #495057;
+
+  --syn-border-subtle: rgba(255, 255, 255, 0.07);
+  --syn-border-strong: rgba(255, 255, 255, 0.15);
+
+  --syn-cobalt: #5C85FF;
+  --syn-cobalt-ink: #ADC2FF;
+  --syn-emerald: #20C997;
+  --syn-emerald-ink: #96F2D7;
+  --syn-amber: #F59F00;
+  --syn-amber-ink: #FFEC99;
+  --syn-coral: #FF6B8B;
+  --syn-coral-ink: #FFCCD7;
+  --syn-violet: #9775FA;
+  --syn-violet-ink: #D0BFFF;
+
+  --syn-block-cobalt: rgba(43, 91, 238, 0.11);
+  --syn-block-cobalt-border: rgba(92, 133, 255, 0.24);
+  --syn-block-emerald: rgba(14, 159, 110, 0.11);
+  --syn-block-emerald-border: rgba(32, 201, 151, 0.24);
+  --syn-block-amber: rgba(217, 119, 6, 0.11);
+  --syn-block-amber-border: rgba(245, 159, 0, 0.24);
+  --syn-block-coral: rgba(225, 29, 72, 0.11);
+  --syn-block-coral-border: rgba(255, 107, 139, 0.24);
+  --syn-block-violet: rgba(109, 40, 217, 0.12);
+  --syn-block-violet-border: rgba(151, 117, 250, 0.24);
+}
+
+.syn-studio {
+  background-color: var(--syn-bg-canvas);
+  color: var(--syn-text-primary);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  letter-spacing: -0.011em;
+}
+
+.syn-color-block {
+  border-radius: var(--syn-radius-md);
+  padding: 1rem 1.125rem;
+  border: 1px solid var(--syn-border-subtle);
+  background: var(--syn-bg-surface);
+  transition: transform var(--syn-duration-fast) var(--syn-ease-spring),
+              border-color var(--syn-duration-fast) var(--syn-ease-out),
+              opacity var(--syn-duration-fast) var(--syn-ease-out);
+}
+
+.syn-color-block:hover {
+  transform: translateY(-1px);
+  border-color: var(--syn-border-strong);
+}
+
+.syn-block-cobalt {
+  background: var(--syn-block-cobalt);
+  border-color: var(--syn-block-cobalt-border);
+}
+.syn-block-emerald {
+  background: var(--syn-block-emerald);
+  border-color: var(--syn-block-emerald-border);
+}
+.syn-block-amber {
+  background: var(--syn-block-amber);
+  border-color: var(--syn-block-amber-border);
+}
+.syn-block-coral {
+  background: var(--syn-block-coral);
+  border-color: var(--syn-block-coral-border);
+}
+.syn-block-violet {
+  background: var(--syn-block-violet);
+  border-color: var(--syn-block-violet-border);
+}
+
+@keyframes syn-pulse-ring {
+  0% { transform: scale(0.92); opacity: 0.75; }
+  50% { transform: scale(1.08); opacity: 0.25; }
+  100% { transform: scale(0.92); opacity: 0.75; }
+}
+
+@keyframes syn-eye-blink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  96% { transform: scaleY(0.12); }
+}
+
+@keyframes syn-float-subtle {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-2.5px); }
+}
+
+@keyframes syn-wave-bar {
+  0%, 100% { transform: scaleY(0.28); }
+  50% { transform: scaleY(1); }
+}
+
+@keyframes syn-dash-flow {
+  to { stroke-dashoffset: -24; }
+}
+
+.syn-anim-pulse {
+  animation: syn-pulse-ring 2.6s var(--syn-ease-out) infinite;
+  transform-origin: center;
+}
+
+.syn-anim-blink {
+  animation: syn-eye-blink 4.5s ease-in-out infinite;
+  transform-origin: center;
+}
+
+.syn-anim-float {
+  animation: syn-float-subtle 3.2s ease-in-out infinite;
+}
+
+.syn-anim-dash {
+  stroke-dasharray: 6 6;
+  animation: syn-dash-flow 1.2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .syn-anim-pulse,
+  .syn-anim-blink,
+  .syn-anim-float,
+  .syn-anim-dash {
+    animation: none !important;
+  }
+}

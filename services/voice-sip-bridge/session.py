@@ -68,10 +68,17 @@ class CallSession:
         """Входящий фрагмент PCM 16-bit mono."""
         if self._closed:
             return
-        if self._barge_in:
-            # Новая речь абонента прерывает текущее воспроизведение
-            self._cancel_tts()
         segment = self.segmenter.feed(pcm, self.in_sample_rate)
+        # BUG-07: barge-in срабатывает по onset речи (VAD_START_MS = 120 мс),
+        # не дожидаясь конца всей фразы абонента и 600 мс тишины
+        if (
+            BARGE_IN_ENABLED
+            and self._tts_task
+            and not self._tts_task.done()
+            and self.segmenter.has_active_speech_onset()
+        ):
+            log.info('Barge-in onset: речь абонента прерывает озвучку (%s)', self.session_id)
+            self._cancel_tts()
         if segment:
             await self._handle_utterance(segment)
 

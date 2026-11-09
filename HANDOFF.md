@@ -6,30 +6,68 @@
 ## 1. Что это за проект
 
 Self-hosted корпоративная платформа текстовых и голосовых ботов на базе
-форка Open WebUI 0.13.0. Пять этапов разработки по цепочке ТЗ
+форка Open WebUI 0.13.0. Шесть этапов разработки: цепочка ТЗ
 (`C:\Users\user\Downloads\ai_open_webui.md`, `ai.md`,
-`stage_3_*.md`, `stage_4_*.md`, `stage_5_*.md`) — все выполнены полностью.
+`stage_3_*.md`, `stage_4_*.md`, `stage_5_*.md`) и мастер-ТЗ рефакторинга
+(`C:\Users\user\Downloads\synrespond_master_tz (1).md`) — все выполнены полностью.
 
 **Расположение**: `F:\Z\chatbot\enterprise-ai-platform` (диск F:, на C: нет места).
-Два git-репозитория:
+Один git-репозиторий (монорепо, история сквошнута в `d36f5b0`):
 
-| Репозиторий | Ветка | Роль |
-|---|---|---|
-| `enterprise-ai-platform/` (корень) | `main` | Сервисы, тесты, инфраструктура, доки |
-| `enterprise-ai-platform/open-webui-fork/` | `feat/enterprise-platform` | Форк open-webui 0.13.0 + все доработки ядра |
-| `enterprise-ai-platform/pipelines/` | main | Submodule: стоковый рантайм pipelines |
+| Каталог | Роль |
+|---|---|
+| `open-webui-fork/` | Форк open-webui 0.13.0 + доработки ядра и UI (вложенный `.git` пуст — не отдельный репозиторий) |
+| `services/` | encoder-classifier, ragas-worker, voice-sip-bridge |
+| `pipelines/` | Стоковый рантайм pipelines |
 
 ## 2. Выполненные этапы (все закрыты)
 
-| Этап | ТЗ | Что сделано | Коммиты форка | Коммиты корня |
-|---|---|---|---|---|
-| 1 | `ai_open_webui.md` | Базовая платформа: интенты, HippoRAG, Ragas, голос, UI, Docker | `dc3e000` | `4a530b2`, `784de22` |
-| 2 | `ai.md` (аудит) | Д1–Д5 + Ф1–Ф7 + тесты + запуск UI | `fbec4e7`, `bbd61f4` | `f37aa7d`, `8256beb` |
-| 3 | `stage_3_*.md` | Стабилизация: atomic swap, PII стрим, slot-filling, aiortc, judge | `7399e82` | `9e0f6f8` |
-| 4 | `stage_4_*.md` | Модульность каналов, MCP двусторонний, AI-Ready | `c08f91e`, `6b87926` | `e5f195f`, `b73ffd8` |
-| 5 | `stage_5_*.md` | Zero Technical Debt: единый RRF, aiortc SDP, семантическая прокси, local judge, 22/22 E2E | `679198e` | `417ad4b`, `9b651c4` |
+| Этап | ТЗ | Что сделано |
+|---|---|---|
+| 1 | `ai_open_webui.md` | Базовая платформа: интенты, HippoRAG, Ragas, голос, UI, Docker |
+| 2 | `ai.md` (аудит) | Д1–Д5 + Ф1–Ф7 + тесты + запуск UI |
+| 3 | `stage_3_*.md` | Стабилизация: atomic swap, PII стрим, slot-filling, aiortc, judge |
+| 4 | `stage_4_*.md` | Модульность каналов, MCP двусторонний, AI-Ready |
+| 5 | `stage_5_*.md` | Zero Technical Debt: единый RRF, aiortc SDP, семантическая прокси, local judge, 22/22 E2E |
+| 6 | `synrespond_master_tz (1).md` | Рефакторинг: SEC-01..06, BUG-01..09, http_pool, батч-NER, дизайн-система synrespond, 145 юнит + 22 E2E |
 
 Отчеты: `docs/WORK_REPORT.md` (этапы 1–5), `docs/STAGE4_REPORT.md` (этап 4 подробно).
+
+### Этап 6 (мастер-ТЗ) — ключевые изменения
+
+- Безопасность: `utils/security_guard.py` (SSRF-фильтр `validate_outbound_url`,
+  `safe_subpath`/`validate_safe_identifier`, ReDoS-фильтр `safe_regex_fullmatch`,
+  `parse_safe_stdio_command` с белым списком `MCP_STDIO_ALLOWLIST`, Fernet-шифрование
+  `encrypt_secret`/`decrypt_secret` на `WEBUI_SECRET_KEY`). Мутирующие MCP-инструменты
+  только для admin (HTTP 403), `auth_token` харнесов маскируется в API и шифруется в БД.
+- `utils/http_pool.py` — общий keep-alive `httpx.AsyncClient` (32/128) для ядра.
+- BUG-01: `await schedule_hipporag_indexing` во всех 6 точках; BUG-02: честный
+  `async def is_channel_enabled`; BUG-03: `ensure_live_run` внутри `insert_sample`;
+  BUG-04: `SLOT_CAPABLE_ACTIONS` + поля `allowed_channels`/`mcp_harness_config`/`meta`
+  в `IntentRouteForm`; BUG-05: авто-`registry.reload()` после файнтюна + feedback
+  статус `trained`; BUG-06: версионированный `_BM25_CACHE` без пересборки BM25 на
+  каждый запрос, один опрос dense/BM25 на ход, батч-NER в `/v1/extract-slots`
+  (поле `texts[]`, один прогон ONNX на пакет); BUG-07: модульные `_bot_stream`/
+  `_tts_sentence`, очистка `_active_pcs`, barge-in по onset 120 мс (ядро и
+  SIP-мост), PCM-плеер и `?token=` в `ChannelRuntimePanel`; BUG-08:
+  `unmask_sse_stream_chunk` не ломает JSON SSE; BUG-09: токенизатор и try/finally
+  в `export_onnx.py`.
+- Сервисы: `POST /v1/pipeline-analyze` (guard+classify+slots за один RTT),
+  `InvalidModelId` -> HTTP 400 на traversal, `ModelRegistry.reload()`,
+  `VOICE_BRIDGE_SECRET` на /ws/audio и /v1/call-status, WS-токен `?token=` в ядре.
+- UI: дизайн-система «Synrespond Tactile Minimalism» (`src/lib/components/synrespond/`:
+  `synrespond-tokens.css`, `SynIcon.svelte` (24 иконки), `SynEmoji.svelte` (10 состояний),
+  `ModuleSettingsDrawer.svelte`), перезаписаны `Intents.svelte`,
+  `IntentRouterTable.svelte` (6 действий, канальный фильтр, regex-тестер),
+  `ChannelRuntimePanel.svelte` (полнодуплексный WebRTC-тестер), переведены
+  `Ragas.svelte` и `HippoRAGGraphViewer.svelte`. Ноль сторонних иконочных
+  библиотек и системных эмодзи — проверяет `scripts/verify_custom_ui_and_security.py`.
+- Новые env: `MCP_STDIO_ALLOWLIST`, `OUTBOUND_ALLOWED_HOSTS`, `ALLOW_LOCALHOST_WEBHOOKS`,
+  `VOICE_BRIDGE_SECRET`, `OPEN_WEBUI_INTERNAL_URL` (см. `.env.example`).
+- Запуск стенда: `scripts/run_local_ui.sh` под Git Bash подменяет `$ROOT` на
+  POSIX-путь `/f/...` — ragas-worker не открывает `sqlite:////f/...`. Сервисы
+  :8002/:8765 при таком запуске поднимайте вручную с Windows-путями
+  (`sqlite:///F:/Z/...`), либо запускайте скрипт из WSL.
 
 ## 3. Архитектура — ключевые файлы
 
@@ -121,13 +159,13 @@ curl http://127.0.0.1:8765/health   # {"status":"ok"}
 
 ```bash
 cd F:/Z/chatbot/enterprise-ai-platform
-.venv-encoder/Scripts/python -m pytest tests/ -q           # 102 юнит
+.venv-encoder/Scripts/python -m pytest tests/ -q           # 145 юнит
 .venv-encoder/Scripts/python -m pytest tests/e2e_platform_verify.py -v  # E2E
 ```
 
 | Набор | Кол-во | Статус |
 |---|---|---|
-| Юнит: все файлы в tests/ | 102 | 102 passed |
+| Юнит: все файлы в tests/ | 145 | 145 passed (включая test_master_tz_refactor.py — 43) |
 | E2E (20 + 2 Stage 5) | 22 | **22 passed, 0 failed, 0 skipped** при E2E_STRICT=true на живом стенде |
 
 Переменные для E2E: `E2E_API_TOKEN` (Bearer токен админа), `E2E_NLI_MODEL=rubert-nli-v1`, `E2E_SLOT_MODEL=rubert-slots-v1`, `E2E_RAGAS_URL=http://localhost:8002`, `E2E_STRICT=true`.
@@ -194,7 +232,7 @@ enterprise-ai-platform/
 │   └── voice-sip-bridge/    # Телефония (server.py, session.py, speech.py, vad.py, audiosocket.py, emotion.py, call_status.py)
 ├── pipelines-custom/        # intent_router_inlet.py
 ├── models/encoders/         # 4 ONNX-модели (rubert-intents-v1, rubert-nli-v1, rubert-slots-v1, rubert-embed-v1)
-├── tests/                   # 102 юнит + 22 E2E + QA_PIPELINE.md
+├── tests/                   # 145 юнит + 22 E2E + QA_PIPELINE.md
 ├── scripts/                 # run_local_ui.sh, bootstrap_models.py
 ├── deploy/DEPLOYMENT.md     # 16 разделов
 ├── docs/                    # WORK_REPORT.md, STAGE4_REPORT.md

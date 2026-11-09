@@ -101,6 +101,17 @@ def _docs_to_result(docs: list[dict[str, Any]], collection_name: str) -> dict[st
     }
 
 
+# BUG-06: версионированный in-memory кэш BM25-индекса по коллекциям.
+# Ключ — имя коллекции, значение — (version_tag, docs, bm25_retriever).
+# Инвалидация: тег версии каталога графа (version.txt) + invalidate_bm25_cache().
+_BM25_CACHE: dict[str, tuple[str, list[Any], Any]] = {}
+
+
+def invalidate_bm25_cache(collection_name: str) -> None:
+    """Сбрасывает кэш BM25-индекса коллекции (после атомарной подмены графа)."""
+    _BM25_CACHE.pop(collection_name, None)
+
+
 async def _separate_dense_bm25(
     request,
     collection_name: str,
@@ -109,46 +120,66 @@ async def _separate_dense_bm25(
     k: int,
     user=None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """К1: два независимых ранжированных списка по одному корпусу.
+    """К1: два независимых ранжированных списка (Dense и BM25) с in-memory кэшированием BM25.
 
-    BM25 строится локально (rank_bm25), dense — через векторный поиск ядра.
-    Дедупликация по тексту чанка; ранки считаются с 1.
+    BM25 строится локально (rank_bm25) один раз на версию коллекции и живет в
+    _BM25_CACHE; dense — через векторный поиск ядра. Дедупликация по тексту
+    чанка; ранки считаются с 1.
     """
     import asyncio
 
     from rank_bm25 import BM25Okapi
     from langchain_core.documents import Document
 
+    from open_webui.retrieval.hipporag_engine import _graph_version, get_hipporag_adapter
     from open_webui.retrieval.utils import (
         BM25Retriever,
         VectorSearchRetriever,
         get_all_items_from_collections,
     )
 
-    data = await asyncio.to_thread(get_all_items_from_collections, [collection_name])
-    payload = (data or {}).get(collection_name) or {}
-    documents = (payload.get('documents') or [[]])[0]
-    metadatas = (payload.get('metadatas') or [[]])[0]
-    if not documents:
-        return [], []
+    _, save_dir = get_hipporag_adapter()._graph_dir(collection_name)
+    version_tag = _graph_version(save_dir) or "v0"
 
-    docs = [
-        Document(page_content=str(text), metadata=metadatas[idx] if idx < len(metadatas) and metadatas[idx] else {})
-        for idx, text in enumerate(documents)
-    ]
-    bm25_retriever = BM25Retriever(
-        docs=docs, vectorizer=BM25Okapi([d.page_content.split() for d in docs]), k=min(k, len(docs))
-    )
+    cached = _BM25_CACHE.get(collection_name)
+    if cached is not None and cached[0] == version_tag:
+        docs, bm25_retriever = cached[1], cached[2]
+        bm25_retriever.k = min(k, len(docs))
+    else:
+        data = await asyncio.to_thread(get_all_items_from_collections, [collection_name])
+        payload = (data or {}).get(collection_name) or {}
+        documents = (payload.get('documents') or [[]])[0]
+        metadatas = (payload.get('metadatas') or [[]])[0]
+        if not documents:
+            return [], []
+        docs = [
+            Document(
+                page_content=str(text),
+                metadata=metadatas[idx] if idx < len(metadatas) and metadatas[idx] else {},
+            )
+            for idx, text in enumerate(documents)
+        ]
+        bm25_retriever = BM25Retriever(
+            docs=docs,
+            vectorizer=BM25Okapi([d.page_content.lower().split() for d in docs]),
+            k=min(k, len(docs)),
+        )
+        _BM25_CACHE[collection_name] = (version_tag, docs, bm25_retriever)
+
     vector_retriever = VectorSearchRetriever(
-        collection_name=collection_name, embedding_function=embedding_function, top_k=min(k, len(docs))
+        collection_name=collection_name,
+        embedding_function=embedding_function,
+        top_k=min(k, len(docs)),
     )
 
     dense_merged: dict[str, Document] = {}
     bm25_merged: dict[str, Document] = {}
     for query in queries:
         try:
-            dense_batch = await vector_retriever.ainvoke(query)
-            bm25_batch = await bm25_retriever.ainvoke(query)
+            dense_batch, bm25_batch = await asyncio.gather(
+                vector_retriever.ainvoke(query),
+                bm25_retriever.ainvoke(query),
+            )
         except Exception as exc:  # noqa: BLE001
             log.warning('Separate retrieval failed for %s: %s', collection_name, exc)
             continue
@@ -284,8 +315,11 @@ async def query_collection_with_graph_fusion(
 ) -> dict[str, Any]:
     """Базовый гибридный поиск + контур HippoRAG + слияние Weighted RRF.
 
-    При выключенном графе или ошибке HippoRAG возвращает результат
-    базового query_collection без изменений — деградация прозрачна.
+    При выключенном графе возвращает результат базового query_collection.
+    При активном графе холостой query_collection не выполняется (BUG-06):
+    dense и BM25 списки берутся раздельно один раз и сливаются с HippoRAG
+    через weighted_rrf_three_way. При ошибке — прозрачная деградация к базовому
+    гибриду.
     """
     from open_webui.models.config import Config  # noqa: PLC0415
     from open_webui.retrieval.utils import query_collection  # noqa: PLC0415
@@ -296,18 +330,20 @@ async def query_collection_with_graph_fusion(
         merged['return_pool'] = retrieval_overrides.get('return_pool')
         hybrid_weights = merged
 
-    base_result = await query_collection(
-        request,
-        collection_names=collection_names,
-        queries=queries,
-        embedding_function=embedding_function,
-        k=k,
-        user=user,
-    )
-
     graph_enabled = bool(await Config.get('hipporag.enable')) and use_hipporag
+
+    async def _base_query() -> dict[str, Any]:
+        return await query_collection(
+            request,
+            collection_names=collection_names,
+            queries=queries,
+            embedding_function=embedding_function,
+            k=k,
+            user=user,
+        )
+
     if not graph_enabled:
-        return base_result
+        return await _base_query()
 
     # Д3: Voice Fast-Path — сущности для PPR из ONNX-энкодера вместо LLM
     voice_mode = bool(getattr(request.state, 'voice_mode', False))
@@ -331,8 +367,10 @@ async def query_collection_with_graph_fusion(
 
         fused_result: dict[str, Any] = {}
         for collection_name in collection_names:
-            base_docs = _result_to_docs(
-                {collection_name: base_result.get(collection_name, {})}, 'dense+bm25'
+            # BUG-06: один раздельный опрос dense+BM25 на ход — без холостого
+            # query_collection перед слиянием.
+            dense_docs, bm25_docs = await _separate_dense_bm25(
+                request, collection_name, queries, embedding_function, k, user
             )
             hippo_docs = (
                 await adapter.retrieve_ppr_fast(request, collection_name, queries, top_k=max(k, 15))
@@ -344,9 +382,6 @@ async def query_collection_with_graph_fusion(
                 # К1 (Stage 4): честные три раздельных списка ранков
                 # (dense, bm25, hipporag) — без слитого EnsembleRetriever.
                 pool_docs = []
-                dense_docs, bm25_docs = await _separate_dense_bm25(
-                    request, collection_name, queries, embedding_function, k, user
-                )
                 for list_name, docs in (
                     ('dense', dense_docs),
                     ('bm25', bm25_docs),
@@ -361,9 +396,6 @@ async def query_collection_with_graph_fusion(
 
             # Д1 (Stage 5): боевой путь — та же формула weighted_rrf_three_way,
             # что и в оптимизаторе Auto-Tune, с полной телеметрией ранков.
-            dense_docs, bm25_docs = await _separate_dense_bm25(
-                request, collection_name, queries, embedding_function, k, user
-            )
             from langchain_core.documents import Document
 
             dense_lcdrs = [
@@ -379,11 +411,6 @@ async def query_collection_with_graph_fusion(
                 for d in hippo_docs
             ]
 
-            weights = hybrid_weights or {
-                'dense': await Config.get('rag.hybrid_weight_dense'),
-                'bm25': await Config.get('rag.hybrid_weight_bm25'),
-                'hipporag': await Config.get('rag.hybrid_weight_hipporag'),
-            }
             fused_lcdrs = weighted_rrf_three_way(
                 dense_lcdrs,
                 bm25_lcdrs,
@@ -397,11 +424,7 @@ async def query_collection_with_graph_fusion(
             top_docs = [(doc, doc.metadata.get('fusion_score', 0.0)) for doc, _ in fused_lcdrs]
             fused_result.update(_docs_to_result([d for d, _ in top_docs], collection_name))
 
-        # Коллекции, которых нет в базовом результате, добавляем как есть
-        for collection_name, payload in base_result.items():
-            if collection_name not in fused_result:
-                fused_result[collection_name] = payload
         return fused_result
     except Exception as exc:  # noqa: BLE001 — граф не должен ломать поиск
         log.warning('Graph fusion skipped, falling back to base hybrid: %s', exc)
-        return base_result
+        return await _base_query()

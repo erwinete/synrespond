@@ -33,6 +33,10 @@ TASK_EMBEDDING = "feature_extraction"
 _HYPOTHESIS_LABEL = "entailment"
 
 
+class InvalidModelId(ValueError):
+    """SEC-03: недопустимый id модели (traversal или недопустимые символы) — HTTP 400."""
+
+
 def resolve_providers(setting: str | None = None) -> list[str]:
     """Список провайдеров ONNX Runtime из переменной окружения или auto."""
     setting = (setting or os.getenv("ONNX_PROVIDERS", "auto")).strip().lower()
@@ -47,6 +51,9 @@ class ModelArtifact:
     """Загруженная модель: сессия ONNX, токенизатор и метаданные label_map.json."""
 
     def __init__(self, model_id: str, models_dir: str):
+        # SEC-03: id модели проверяется до конкатенации путей (Path Traversal)
+        if not model_id or ".." in model_id or "/" in model_id or "\\" in model_id:
+            raise InvalidModelId(f"Invalid model id: {model_id!r}")
         self.model_id = model_id
         self.path = os.path.join(models_dir, model_id)
         model_path = os.path.join(self.path, "model.onnx")
@@ -176,6 +183,63 @@ class ModelArtifact:
             span["text"] = text[span["start"] : span["end"]]
         return spans
 
+    def extract_spans_batch(self, texts: list[str], aggregation_threshold: float) -> list[list[dict[str, Any]]]:
+        """Пакетный Token Classification: один прогон ONNX на список текстов (BUG-06)."""
+        if not texts:
+            return []
+        enc = self.tokenizer(
+            list(texts),
+            return_offsets_mapping=True,
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="np",
+        )
+        offsets = enc.pop("offset_mapping")  # [batch, seq, 2]
+        logits = self._run({k: v for k, v in enc.items()})  # [batch, seq, num_labels]
+        probs = softmax_batch(logits)
+        pred_ids = probs.argmax(axis=-1)
+
+        id2label = {int(k): v for k, v in self.labels.items()}
+        special = set(self.tokenizer.all_special_ids)
+        result: list[list[dict[str, Any]]] = []
+        for b, text in enumerate(texts):
+            spans: list[dict[str, Any]] = []
+            current: dict[str, Any] | None = None
+            for idx in range(pred_ids.shape[1]):
+                start, end = int(offsets[b][idx][0]), int(offsets[b][idx][1])
+                pred_id = int(pred_ids[b][idx])
+                if pred_id in special or end <= start:
+                    if current:
+                        spans.append(current)
+                        current = None
+                    continue
+                label = id2label.get(pred_id, "O")
+                conf = float(probs[b][idx][pred_id])
+                if label == "O" or conf < aggregation_threshold:
+                    if current:
+                        spans.append(current)
+                        current = None
+                    continue
+                if label.startswith("B-") or current is None or current["label"] != label[2:]:
+                    if current:
+                        spans.append(current)
+                    current = {
+                        "label": label[2:] if label.startswith(("B-", "I-")) else label,
+                        "start": start,
+                        "end": end,
+                        "confidence": conf,
+                    }
+                else:
+                    current["end"] = end
+                    current["confidence"] = min(current["confidence"], conf)
+            if current:
+                spans.append(current)
+            for span in spans:
+                span["text"] = text[span["start"] : span["end"]]
+            result.append(spans)
+        return result
+
 
     def embed(self, texts: list[str]) -> "np.ndarray":
         """К3 (Stage 4): mean-pooled эмбеддинги из feature-extraction ONNX."""
@@ -238,6 +302,9 @@ class ModelRegistry:
 
     def get(self, model_id: str) -> ModelArtifact:
         """Возвращает модель, загружая при первом обращении (потокобезопасно)."""
+        # SEC-03: защита от traversal в id модели до обращения к файловой системе
+        if not model_id or ".." in model_id or "/" in model_id or "\\" in model_id:
+            raise InvalidModelId(f"Invalid model id: {model_id!r}")
         artifact = self._artifacts.get(model_id)
         if artifact is not None:
             return artifact
@@ -247,6 +314,14 @@ class ModelRegistry:
                 artifact = ModelArtifact(model_id, self.models_dir)
                 self._artifacts[model_id] = artifact
             return artifact
+
+    def reload(self, model_id: str) -> ModelArtifact:
+        """Сбрасывает кэш артефакта и загружает модель с диска заново (BUG-05)."""
+        if not model_id or ".." in model_id or "/" in model_id or "\\" in model_id:
+            raise InvalidModelId(f"Invalid model id: {model_id!r}")
+        with self._lock:
+            self._artifacts.pop(model_id, None)
+        return self.get(model_id)
 
     def warmup(self) -> list[str]:
         """Загружает все доступные модели. Возвращает список ошибок."""

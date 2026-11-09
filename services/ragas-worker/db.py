@@ -87,8 +87,14 @@ async def ensure_live_run(session: AsyncSession, run_id: str, bot_model_id: Opti
 
 
 async def insert_sample(payload: dict[str, Any]) -> None:
-    """Пишет один оцененный диалог и инкрементирует счетчик запуска."""
+    """Пишет один оцененный диалог, гарантируя существование суточного live-рана (BUG-03)."""
     async with SessionFactory() as session:
+        run_id = payload.get('run_id')
+        if run_id and str(run_id).startswith('live-'):
+            # Контракт 3: live-сэмплы не должны вставляться с висячим run_id —
+            # агрегирующая строка live-YYYYMMDD создается в той же транзакции
+            await ensure_live_run(session, str(run_id), payload.get('bot_model_id'))
+
         await session.execute(
             insert(ragas_sample).values(
                 id=str(uuid.uuid4()),
@@ -96,13 +102,13 @@ async def insert_sample(payload: dict[str, Any]) -> None:
                 **{k: v for k, v in payload.items() if k in ragas_sample.c.keys()},
             )
         )
-        if payload.get('run_id'):
+        if run_id:
             run = await session.execute(
-                select(ragas_run.c.sample_count).where(ragas_run.c.id == payload['run_id'])
+                select(ragas_run.c.sample_count).where(ragas_run.c.id == run_id)
             )
             current = (run.scalar() or 0) + 1
             await session.execute(
-                update(ragas_run).where(ragas_run.c.id == payload['run_id']).values(
+                update(ragas_run).where(ragas_run.c.id == run_id).values(
                     sample_count=current, status='running'
                 )
             )

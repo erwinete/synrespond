@@ -60,6 +60,10 @@ class IntentRouteForm(BaseModel):
     direct_response: Optional[str] = None
     webhook_config: Optional[dict[str, Any]] = None
     required_slots: Optional[list[dict[str, Any]]] = None
+    # BUG-04: REST API больше не отбрасывает канальные ограничения и MCP-конфиг
+    allowed_channels: Optional[list[str]] = Field(default_factory=lambda: ['chat', 'webrtc', 'sip'])
+    mcp_harness_config: Optional[dict[str, Any]] = None
+    meta: Optional[dict[str, Any]] = None
     priority: int = 0
     is_active: bool = True
 
@@ -321,17 +325,27 @@ async def train_from_feedback(
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(f'{base_url}/v1/train', json=payload)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            # BUG-05: связка job -> бот, чтобы при успехе пометить feedback 'trained'
+            job_id = (data or {}).get('job_id')
+            if job_id:
+                _train_jobs_bots[str(job_id)] = form.bot_model_id
+            return data
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f'Encoder service unreachable: {exc}')
 
 
+# BUG-05: job_id -> bot_model_id для отметки использованных feedback-строк
+_train_jobs_bots: dict[str, str] = {}
+
+
 @router.get('/train/{job_id}')
 async def train_job_status(
     job_id: str,
     user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """Статус задачи дообучения (прокси в encoder-classifier)."""
     base_url = (await Config.get('intent_classifier.url') or '').rstrip('/')
@@ -341,9 +355,27 @@ async def train_job_status(
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.get(f'{base_url}/v1/train/{job_id}')
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            await _mark_feedback_trained_on_success(job_id, data, db=db)
+            return data
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f'Encoder service unreachable: {exc}')
+
+
+async def _mark_feedback_trained_on_success(job_id: str, data: dict[str, Any], db: AsyncSession) -> None:
+    """BUG-05: при успешной подмене модели размеченные строки переводятся в 'trained'."""
+    bot_model_id = _train_jobs_bots.get(job_id)
+    if not bot_model_id:
+        return
+    if data.get('status') != 'completed':
+        return
+    result = data.get('result') or {}
+    if result.get('swapped') is not True:
+        return
+    rows = await IntentFeedbacks.get_labeled_feedback(bot_model_id, db=db)
+    for row in rows:
+        await IntentFeedbacks.update_feedback_by_id(row.id, {'status': 'trained'}, db=db)
+    _train_jobs_bots.pop(job_id, None)
 
 
 # Reasoning Path по графу (киллер-фича №6)
@@ -465,7 +497,19 @@ async def list_harnesses(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    return await MCPHarnesses.get_harnesses(db=db)
+    """Список харнесов без секрета (SEC-05): auth_token маскируется, отдается флаг has_auth_token."""
+    from open_webui.utils.security_guard import mask_secret
+
+    harnesses = await MCPHarnesses.get_harnesses(db=db)
+    return [
+        {
+            **h.model_dump(),
+            'auth_token': None,
+            'auth_token_masked': mask_secret(h.auth_token),
+            'has_auth_token': bool(h.auth_token),
+        }
+        for h in harnesses
+    ]
 
 
 @router.post('/harnesses/create')
@@ -474,7 +518,11 @@ async def create_harness(
     user=Depends(get_admin_user),
     db: AsyncSession = Depends(get_async_session),
 ):
+    from open_webui.utils.security_guard import encrypt_secret
+
     data = form.model_dump()
+    # 8.1: секрет хранится в БД только в зашифрованном виде (Fernet на WEBUI_SECRET_KEY)
+    data['auth_token'] = encrypt_secret(data.get('auth_token'))
     data['discovered_tools_schema'] = {}
     return await MCPHarnesses.insert_new_harness(data, db=db)
 
@@ -494,7 +542,7 @@ async def delete_harness(
 @router.post('/harnesses/{id}/discover')
 async def discover_harness_tools(
     id: str,
-    user=Depends(get_verified_user),
+    user=Depends(get_admin_user),
     db: AsyncSession = Depends(get_async_session),
 ):
     """tools/list у внешнего харнеса + кэш схемы в discovered_tools_schema."""

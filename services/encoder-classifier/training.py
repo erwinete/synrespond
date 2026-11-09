@@ -93,6 +93,7 @@ def start_train_job(registry, models_dir: str, params: dict[str, Any]) -> str:
     )
 
     def _done(fut):
+        reload_ids: list[str] = []
         with _jobs_lock:
             job = _jobs.get(job_id)
             if not job:
@@ -102,9 +103,24 @@ def start_train_job(registry, models_dir: str, params: dict[str, Any]) -> str:
                 job['status'] = 'failed'
                 job['error'] = str(exc)
             else:
+                res = fut.result()
                 job['status'] = 'completed'
-                job['result'] = fut.result()
+                job['result'] = res
+                # BUG-05: подпроцесс сохранил новую ONNX-модель на диск —
+                # родительский процесс обязан сбросить кэш весов реестра,
+                # иначе сервис продолжает отвечать старыми весами.
+                if isinstance(res, dict) and res.get('swapped') is True and registry is not None:
+                    reload_ids = [
+                        str(m)
+                        for m in (params.get('base_model_id'), res.get('out_model_id'))
+                        if m
+                    ]
             _futures.pop(job_id, None)
+        for model_id in reload_ids:
+            try:
+                registry.reload(model_id)
+            except Exception as reload_exc:  # noqa: BLE001
+                logger.warning('Registry reload failed for %s: %s', model_id, reload_exc)
 
     future.add_done_callback(_done)
     with _jobs_lock:

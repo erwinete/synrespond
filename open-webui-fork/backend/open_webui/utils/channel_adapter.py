@@ -58,19 +58,15 @@ def detect_channel(request, payload: dict | None = None) -> Channel:
     return 'chat'
 
 
-def is_channel_enabled(channel: Channel, config_get) -> bool:
-    """Матрица отключения: channels.<channel>.enabled из config."""
-
-    async def _check() -> bool:
-        key = {
-            'chat': 'channels.chat.enabled',
-            'webrtc': 'channels.webrtc.enabled',
-            'sip': 'channels.sip.enabled',
-        }[channel]
-        value = await config_get(key)
-        return value is not False and bool(value if value is not None else True)
-
-    return _check()  # type: ignore[return-value]
+async def is_channel_enabled(channel: Channel, config_get) -> bool:
+    """Матрица отключения: асинхронно проверяет channels.<channel>.enabled из config (BUG-02)."""
+    key = {
+        'chat': 'channels.chat.enabled',
+        'webrtc': 'channels.webrtc.enabled',
+        'sip': 'channels.sip.enabled',
+    }.get(channel, 'channels.chat.enabled')
+    value = await config_get(key)
+    return value is not False and bool(value if value is not None else True)
 
 
 def filter_routes_by_channel(routes: list[Any], channel: Channel) -> list[Any]:

@@ -47,8 +47,12 @@ class HippoRAGAdapter:
     def _graph_dir(self, collection_id: str) -> tuple[str, str]:
         from open_webui.config import DATA_DIR  # noqa: PLC0415
 
+        # SEC-03: collection_id проверяется на Path Traversal до конкатенации пути
+        from open_webui.utils.security_guard import safe_subpath
+
         base_dir = os.getenv('HIPPORAG_STORAGE_DIR', f'{DATA_DIR}/hipporag_storage')
-        return base_dir, os.path.join(base_dir, collection_id)
+        safe_dir = safe_subpath(base_dir, str(collection_id), field_name='collection_id')
+        return base_dir, safe_dir
 
     def _get_lightweight(self, request, collection_id: str):
         """Кэш легковесного графа с той же сверкой version.txt."""
@@ -514,20 +518,52 @@ class LightweightHippoGraph:
         self._chunk_count = 0
 
     def index(self, texts: list) -> None:
-        """Строит граф: passage-узлы = тексты чанков, entity-узлы = спаны."""
-        for text in texts:
-            text = str(text).strip()
-            if not text:
-                continue
-            self._chunk_count += 1
-            entities = self._extract_entities_sync(text)
-            if not entities:
-                continue
-            for entity in entities:
-                # Ребро passage -> entity (упоминание) и обратно (для PPR)
-                self.graph.add_edge(text, entity, relation='mentions')
-                self.graph.add_edge(entity, text, relation='mentioned_in')
+        """Строит граф: passage-узлы = тексты чанков, entity-узлы = спаны.
+
+        BUG-06: сущности извлекаются пакетами по 16 текстов — один прогон
+        ONNX на пакет вместо HTTP-вызова на каждый чанк.
+        """
+        clean = [str(t).strip() for t in texts if str(t).strip()]
+        batch_size = 16
+        for start in range(0, len(clean), batch_size):
+            batch = clean[start : start + batch_size]
+            entities_by_text = self._extract_entities_batch_sync(batch)
+            for text, entities in zip(batch, entities_by_text):
+                self._chunk_count += 1
+                if not entities:
+                    continue
+                for entity in entities:
+                    # Ребро passage -> entity (упоминание) и обратно (для PPR)
+                    self.graph.add_edge(text, entity, relation='mentions')
+                    self.graph.add_edge(entity, text, relation='mentioned_in')
         self.save()
+
+    def _extract_entities_batch_sync(self, texts: list[str]) -> list[list[str]]:
+        """Пакетное извлечение сущностей через /v1/extract-slots (texts).
+
+        При недоступности сервиса или старой версии без batch-режима —
+        по-текстовый фоллбэк _extract_entities_sync.
+        """
+        import httpx
+
+        base_url = os.getenv('ENCODER_CLASSIFIER_URL', 'http://encoder-classifier:8001').rstrip('/')
+        slot_model = os.getenv('HIPPORAG_FALLBACK_SLOT_MODEL', 'rubert-slots-v1')
+        try:
+            response = httpx.post(
+                f'{base_url}/v1/extract-slots',
+                json={'texts': texts, 'model_id': slot_model},
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            batch_spans = response.json().get('batch_spans') or []
+            if len(batch_spans) != len(texts):
+                raise ValueError('batch_spans length mismatch')
+            return [
+                list({str(s.get('text') or '').strip() for s in spans if s.get('text')})[:12]
+                for spans in batch_spans
+            ]
+        except Exception:  # noqa: BLE001
+            return [self._extract_entities_sync(text) for text in texts]
 
     def _extract_entities_sync(self, text: str) -> list:
         """Сущности через /v1/extract-slots; при недоступности сервиса — заглавные биграммы."""
@@ -605,6 +641,10 @@ async def schedule_hipporag_indexing(request, collection_id: str) -> None:
     from open_webui.models.config import Config  # noqa: PLC0415
 
     try:
+        # SEC-03: id коллекции проверяется до создания путей и атомарной подмены
+        from open_webui.utils.security_guard import validate_safe_identifier  # noqa: PLC0415
+
+        validate_safe_identifier(str(collection_id), field_name='collection_id')
         if not await Config.get('hipporag.enable'):
             return
         if collection_id in _indexing_in_flight:
@@ -668,6 +708,13 @@ async def _run_indexing(request, collection_id: str) -> None:
         new_version = await asyncio.to_thread(atomic_swap_graph_directory, base_dir, collection_id, tmp_dir)
         tmp_dir = None
         get_hipporag_adapter()._instances.pop(collection_id, None)
+        # Контракт 2: подмена version.txt инвалидирует и BM25-кэш гибридного слияния
+        try:
+            from open_webui.retrieval.hybrid_fusion import invalidate_bm25_cache  # noqa: PLC0415
+
+            invalidate_bm25_cache(collection_id)
+        except Exception:  # noqa: BLE001
+            pass
         log.info(
             'HippoRAG reindex %s: graph swapped, version %s (%s passages)',
             collection_id, new_version, len(texts),

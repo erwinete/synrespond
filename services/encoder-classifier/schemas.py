@@ -65,12 +65,16 @@ class SlotSpan(BaseModel):
 
 
 class ExtractSlotsRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=8000)
+    text: str = Field(default="", max_length=8000)
+    # BUG-06: пакетный режим — один прогон ONNX на список текстов (до 32)
+    texts: Optional[list[str]] = Field(default=None, max_length=32)
     model_id: str = "slots-ner-v1"
 
 
 class ExtractSlotsResponse(BaseModel):
     spans: list[SlotSpan]
+    # Спаны по каждому тексту из texts (порядок совпадает с запросом)
+    batch_spans: Optional[list[list[SlotSpan]]] = None
     latency_ms: float
 
 
@@ -125,6 +129,25 @@ class GuardResponse(BaseModel):
     score: float
     labels: dict[str, Any]
     engine: str
+
+
+class PipelineAnalyzeRequest(BaseModel):
+    """ARCH-01: guard + классификация + слоты за один сетевой RTT."""
+
+    text: str = Field(min_length=1, max_length=8000)
+    model_id: str = "rubert-intents-v1"
+    slot_model_id: str = ""
+    guard_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
+    temperature: float = Field(default=1.0, gt=0.0)
+    tau_high: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    tau_low: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+
+
+class PipelineAnalyzeResponse(BaseModel):
+    guard: Optional[GuardResponse] = None
+    classification: Optional[ClassifyResponse] = None
+    slots: list[SlotSpan] = []
+    latency_ms: float
 
 
 class TrainRequest(BaseModel):

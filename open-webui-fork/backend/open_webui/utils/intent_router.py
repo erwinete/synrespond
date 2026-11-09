@@ -16,7 +16,6 @@ import asyncio
 import json
 import logging
 import random
-import re
 import time
 from typing import Any, Optional
 
@@ -27,6 +26,7 @@ from open_webui.models.intents import IntentRoutes
 from open_webui.utils.channel_adapter import (
     detect_channel,
     filter_routes_by_channel,
+    is_channel_enabled,
     sanitize_for_voice_tts,
 )
 from open_webui.utils.misc import add_or_update_system_message, get_last_user_message
@@ -44,6 +44,17 @@ log = logging.getLogger(__name__)
 
 _SLOT_SESSION_TTL = 1800
 _ANGER_ESCALATION_TURNS = 2
+
+# BUG-04: единый источник истины — какие действия поддерживают слоты.
+# Используется и при старте формы, и при продолжении активной сессии,
+# чтобы MCP_HARNESS не выпадал из второй ветки.
+SLOT_CAPABLE_ACTIONS = (
+    'WEBHOOK_TOOL',
+    'DIRECT_RESPONSE',
+    'MCP_HARNESS',
+    'RAG_COLLECTION',
+    'SYSTEM_PROMPT_OVERRIDE',
+)
 
 
 async def _get_classifier_settings() -> dict[str, Any]:
@@ -238,21 +249,41 @@ async def _set_call_transfer(call_uuid: str, queue: str) -> None:
 
 
 async def _call_webhook(webhook_config: dict[str, Any], variables: dict[str, Any]) -> Optional[str]:
-    """Вызов внешнего REST-бэкенда. Возвращает текст ответа или None."""
-    url = webhook_config.get('url')
-    if not url:
+    """Безопасный вызов внешнего REST-бэкенда с защитой от SSRF и JSON-инъекций (SEC-02, SEC-06)."""
+    from open_webui.utils.http_pool import get_http_client
+    from open_webui.utils.mcp_harness import render_arguments
+    from open_webui.utils.security_guard import validate_outbound_url
+
+    raw_url = webhook_config.get('url')
+    if not raw_url:
         return None
-    body = webhook_config.get('body') or {'message': '{{user_message}}'}
-    rendered_body = json.loads(render_route_template(json.dumps(body, ensure_ascii=False), extra=variables))
-    headers = webhook_config.get('headers') or {}
-    timeout = float(webhook_config.get('timeout_s', 5))
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(url, json=rendered_body, headers=headers)
-            response.raise_for_status()
-            if webhook_config.get('response_format') == 'text':
-                return response.text
-            data = response.json()
+        url = validate_outbound_url(raw_url, allow_internal_services=False)
+    except ValueError as exc:
+        log.warning('Webhook blocked by SSRF guard (%s): %s', raw_url, exc)
+        return None
+
+    body_template = webhook_config.get('body') or {'message': '{{user_message}}'}
+    if isinstance(body_template, dict):
+        # Рендер по дереву значений ДО сериализации — кавычки и переводы строк
+        # в значениях больше не ломают JSON (SEC-06)
+        rendered_body = render_arguments(body_template, variables)
+    else:
+        rendered_body = {'message': str(variables.get('user_message') or '')}
+
+    headers = {
+        str(k): str(v)
+        for k, v in (webhook_config.get('headers') or {}).items()
+        if isinstance(k, str)
+    }
+    timeout = min(max(float(webhook_config.get('timeout_s', 5.0)), 0.5), 30.0)
+    try:
+        client = get_http_client()
+        response = await client.post(url, json=rendered_body, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        if webhook_config.get('response_format') == 'text':
+            return response.text
+        data = response.json()
         path = webhook_config.get('response_path', 'answer')
         value: Any = data
         for part in str(path).split('.'):
@@ -271,7 +302,9 @@ async def _call_webhook(webhook_config: dict[str, Any], variables: dict[str, Any
 
 
 def _missing_required_slots(rule, collected: dict[str, str]) -> list[dict[str, Any]]:
-    """Обязательные слоты, отсутствующие или не прошедшие валидацию."""
+    """Обязательные слоты, отсутствующие или не прошедшие безопасную regex-валидацию (SEC-06)."""
+    from open_webui.utils.security_guard import safe_regex_fullmatch
+
     missing: list[dict[str, Any]] = []
     for slot in rule.required_slots or []:
         name = slot.get('name')
@@ -280,8 +313,13 @@ def _missing_required_slots(rule, collected: dict[str, str]) -> list[dict[str, A
             missing.append(slot)
             continue
         pattern = slot.get('pattern')
-        if pattern and not re.fullmatch(pattern, str(value)):
-            missing.append(slot)
+        if pattern:
+            try:
+                if not safe_regex_fullmatch(pattern, str(value)):
+                    missing.append(slot)
+            except ValueError:
+                log.warning('Invalid or unsafe regex in slot %s: %s', name, pattern)
+                missing.append(slot)
     return missing
 
 
@@ -342,11 +380,10 @@ async def apply_intent_routing(request, form_data: dict, metadata: dict, user, m
     if not routes:
         return
 
-    # Stage 4: определение канала и матрица отключения контуров
+    # Stage 4: определение канала и матрица отключения контуров (BUG-02: async-проверка)
     channel = detect_channel(request, form_data)
     metadata['channel'] = channel
-    channel_enabled = await Config.get(f'channels.{channel}.enabled')
-    if channel_enabled is False:
+    if not await is_channel_enabled(channel, Config.get):
         return
     routes = filter_routes_by_channel(routes, channel)
     if not routes:
@@ -487,7 +524,7 @@ async def apply_intent_routing(request, form_data: dict, metadata: dict, user, m
     # Ф2 + Д3 (Stage 3): декларативный slot-filling с защитой от зацикливания.
     # Активная форма переживает смену темы только до уверенного нового интента;
     # три неудачные валидации подряд переводят диалог в HUMAN_HANDOFF.
-    needs_slots = rule.action_type in ('WEBHOOK_TOOL', 'DIRECT_RESPONSE', 'MCP_HARNESS') and bool(
+    needs_slots = rule.action_type in SLOT_CAPABLE_ACTIONS and bool(
         rule.required_slots
     )
     collected: dict[str, str] = {}
@@ -509,7 +546,7 @@ async def apply_intent_routing(request, form_data: dict, metadata: dict, user, m
                 # Продолжаем сбор активной формы независимо от нового интента
                 rule = active_rule
                 intent_name = rule.intent_name
-                needs_slots = rule.action_type in ('WEBHOOK_TOOL', 'DIRECT_RESPONSE') and bool(
+                needs_slots = rule.action_type in SLOT_CAPABLE_ACTIONS and bool(
                     rule.required_slots
                 )
 
