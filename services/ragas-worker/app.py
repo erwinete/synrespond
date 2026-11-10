@@ -108,9 +108,28 @@ class BatchRunRequest(BaseModel):
     bot_model_id: str | None = None
 
 
+DLQ_KEY = os.getenv('RAGAS_DLQ_KEY', 'ragas:live_dlq')
+DLQ_MAX_LEN = int(os.getenv('RAGAS_DLQ_MAX_LEN', '500'))
+
+
 @app.get('/health')
 async def health():
-    return {'status': 'ok', 'version': VERSION, 'judge_model': JUDGE_LLM_MODEL}
+    """PERF-CORE-06: здоровье + метрики очередей (live и dead-letter)."""
+    queue_len = dlq_len = None
+    try:
+        redis = await get_redis()
+        if redis:
+            queue_len = await redis.llen(LIVE_QUEUE_KEY)
+            dlq_len = await redis.llen(DLQ_KEY)
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        'status': 'ok',
+        'version': VERSION,
+        'judge_model': JUDGE_LLM_MODEL,
+        'live_queue_len': queue_len,
+        'dlq_len': dlq_len,
+    }
 
 
 @app.post('/v1/evaluate/live')
@@ -179,12 +198,20 @@ async def live_queue_consumer() -> None:
             if not redis:
                 await asyncio.sleep(1)
                 continue
-            _, raw = await redis.brpop(LIVE_QUEUE_KEY, timeout=5)
+            # BLMOVE-семантика: сэмпл удаляется из очереди только после
+            # успешной оценки; сбойные задачи уходят в dead-letter (PERF-CORE-06)
+            raw = await redis.lindex(LIVE_QUEUE_KEY, -1)
             if raw is None:
                 await asyncio.sleep(0.2)
                 continue
             payload = json.loads(raw)
-            await evaluate_live_sample(payload)
+            try:
+                await evaluate_live_sample(payload)
+            except Exception as eval_exc:  # noqa: BLE001
+                log.warning('Live sample moved to DLQ: %s', eval_exc)
+                await redis.lpush(DLQ_KEY, raw)
+                await redis.ltrim(DLQ_KEY, 0, DLQ_MAX_LEN - 1)
+            await redis.rpop(LIVE_QUEUE_KEY)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001

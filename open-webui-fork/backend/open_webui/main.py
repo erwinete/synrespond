@@ -1669,13 +1669,17 @@ async def chat_completion(
                 vault_session = metadata.get('pii_vault_session')
                 if vault_session and not isinstance(response, Response) and hasattr(response, 'body_iterator'):
                     try:
-                        from open_webui.utils.pii_vault import get_vault
+                        from open_webui.utils.pii_vault import get_vault, restore_vault
 
                         vault = get_vault(vault_session)
+                        if vault:
+                            # PERF-CORE-04: догрузка токенов из Redis (L2) —
+                            # ответ может генерировать другой воркер
+                            vault = await restore_vault(vault_session, vault)
                         mapping = vault.mapping() if vault else {}
                     except Exception:
                         mapping = {}
-                    if mapping:
+                if mapping:
 
                         async def unmask_stream():
                             from open_webui.utils.pii_vault import (

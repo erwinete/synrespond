@@ -122,6 +122,78 @@ def get_vault(session_key: str) -> PiiVault:
     return _vaults.get(session_key)
 
 
+# --- PERF-CORE-04: двухуровневая синхронизация вольтов между воркерами ---
+# L1 — память процесса (PiiVaultRegistry), L2 — Redis. Значения ПДн перед
+# записью в Redis шифруются Fernet (encrypt_secret), чтобы дамп Redis не
+# содержал открытых персональных данных.
+
+_VAULT_KEY_PREFIX = 'pii_vault:'
+_vault_redis = False  # None/False/клиент; False — еще не инициализирован
+
+
+async def _get_vault_redis():
+    global _vault_redis
+    if _vault_redis is False:
+        try:
+            from open_webui.env import REDIS_URL
+
+            if not REDIS_URL:
+                _vault_redis = None
+            else:
+                import redis.asyncio as aioredis
+
+                _vault_redis = aioredis.from_url(REDIS_URL, decode_responses=True)
+        except Exception:  # noqa: BLE001
+            _vault_redis = None
+    return _vault_redis
+
+
+async def persist_vault(session_key: str, vault: PiiVault, redis=None) -> bool:
+    """Сохраняет зашифрованный снимок вольта в Redis (L2). False — Redis недоступен."""
+    try:
+        import json
+
+        from open_webui.utils.security_guard import encrypt_secret
+
+        redis = redis or await _get_vault_redis()
+        if not redis:
+            return False
+        mapping = vault.mapping()
+        if not mapping:
+            return True
+        payload = json.dumps(
+            {token: encrypt_secret(value) for token, value in mapping.items()},
+            ensure_ascii=False,
+        )
+        await redis.set(f'{_VAULT_KEY_PREFIX}{session_key}', payload, ex=vault.ttl_seconds)
+        return True
+    except Exception:  # noqa: BLE001 — L2 не должен ломать маскирование
+        return False
+
+
+async def restore_vault(session_key: str, vault: PiiVault, redis=None) -> PiiVault:
+    """Догружает токены из Redis (L2) в локальный вольт, если их там еще нет."""
+    try:
+        import json
+
+        from open_webui.utils.security_guard import decrypt_secret
+
+        redis = redis or await _get_vault_redis()
+        if not redis:
+            return vault
+        raw = await redis.get(f'{_VAULT_KEY_PREFIX}{session_key}')
+        if not raw:
+            return vault
+        for token, encrypted in json.loads(raw).items():
+            if token not in vault.mapping():
+                value = decrypt_secret(encrypted)
+                if value:
+                    vault._vault[token] = (value, time.monotonic() + vault.ttl_seconds)
+        return vault
+    except Exception:  # noqa: BLE001
+        return vault
+
+
 class StreamingPIIUnmasker:
     """Д2 (Stage 3): потоковый демаскировщик для SSE-стримов и TTS-пайплайна.
 

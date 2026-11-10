@@ -41,6 +41,8 @@ class EncoderForm(BaseModel):
 class EncoderTestForm(BaseModel):
     text: str = Field(min_length=1)
     model_path: str = Field(min_length=1)
+    task: Optional[str] = None
+    candidate_labels: Optional[list[str]] = None
     endpoint_url: Optional[str] = None
     tau_high: Optional[float] = None
     tau_low: Optional[float] = None
@@ -120,18 +122,128 @@ async def test_encoder(
     form: EncoderTestForm,
     user=Depends(get_admin_user),
 ):
-    """Прокси-тест инференса: гистограмма top-k и время ответа (ТЗ, раздел 4.3)."""
+    """Универсальный прокси-тест инференса для всех 4 типов задач (PERF-CORE-02).
+
+    sequence_classification -> /v1/classify; token_classification -> /v1/extract-slots;
+    zero_shot_nli -> /v1/zero-shot; feature_extraction -> /v1/embeddings
+    (размерность, L2-норма и превью вектора)."""
+    from open_webui.utils.http_pool import get_http_client
+    from open_webui.utils.security_guard import validate_outbound_url
+
     base_url = (form.endpoint_url or await Config.get('intent_classifier.url') or '').rstrip('/')
     if not base_url:
         raise HTTPException(status_code=400, detail='Encoder service URL is not configured')
-    payload: dict[str, Any] = {'text': form.text, 'model_id': form.model_path}
-    if form.tau_high is not None:
-        payload['tau_high'] = form.tau_high
-    if form.tau_low is not None:
-        payload['tau_low'] = form.tau_low
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.post(f'{base_url}/v1/classify', json=payload)
+        validate_outbound_url(base_url, allow_internal_services=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    task = (form.task or '').strip()
+    if not task:
+        if 'slots' in form.model_path:
+            task = 'token_classification'
+        elif 'nli' in form.model_path:
+            task = 'zero_shot_nli'
+        elif 'embed' in form.model_path:
+            task = 'feature_extraction'
+        else:
+            task = 'sequence_classification'
+
+    client = get_http_client()
+    try:
+        if task == 'token_classification':
+            resp = await client.post(
+                f'{base_url}/v1/extract-slots',
+                json={'text': form.text, 'model_id': form.model_path},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {'task': task, 'spans': data.get('spans', []), 'latency_ms': data.get('latency_ms', 0.0)}
+
+        if task == 'zero_shot_nli':
+            labels = [l.strip() for l in (form.candidate_labels or []) if l.strip()]
+            if len(labels) < 2:
+                labels = ['billing_refund', 'order_status', 'tech_support', 'greeting']
+            resp = await client.post(
+                f'{base_url}/v1/zero-shot',
+                json={'text': form.text, 'model_id': form.model_path, 'labels': labels},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            data['task'] = task
+            return data
+
+        if task == 'feature_extraction':
+            import math
+            import time as _t
+
+            t0 = _t.perf_counter()
+            resp = await client.post(
+                f'{base_url}/v1/embeddings',
+                json={'input': [form.text], 'model': form.model_path},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            vec = (resp.json().get('data') or [{}])[0].get('embedding') or []
+            norm = round(math.sqrt(sum(v * v for v in vec)), 4) if vec else 0.0
+            return {
+                'task': task,
+                'dimensions': len(vec),
+                'l2_norm': norm,
+                'vector_preview': vec[:16],
+                'latency_ms': round((_t.perf_counter() - t0) * 1000, 2),
+            }
+
+        payload: dict[str, Any] = {'text': form.text, 'model_id': form.model_path}
+        if form.tau_high is not None:
+            payload['tau_high'] = form.tau_high
+        if form.tau_low is not None:
+            payload['tau_low'] = form.tau_low
+        resp = await client.post(f'{base_url}/v1/classify', json=payload, timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
+        data['task'] = task
+        return data
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f'Encoder service unreachable: {exc}')
+
+
+@router.post('/encoders/{model_path}/reload')
+async def reload_encoder_model(
+    model_path: str,
+    user=Depends(get_admin_user),
+):
+    """PERF-UI-02: горячая перезагрузка ONNX-модели в RAM (прокси в сервис)."""
+    base_url = (await Config.get('intent_classifier.url') or '').rstrip('/')
+    if not base_url:
+        raise HTTPException(status_code=400, detail='Encoder service URL is not configured')
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(f'{base_url}/v1/models/{model_path}/reload')
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f'Encoder service unreachable: {exc}')
+
+
+@router.post('/encoders/{model_path}/rollback')
+async def rollback_encoder_model(
+    model_path: str,
+    user=Depends(get_admin_user),
+):
+    """PERF-UI-02/PERF-CORE-09: 1-клик откат модели к предыдущей стабильной версии."""
+    base_url = (await Config.get('intent_classifier.url') or '').rstrip('/')
+    if not base_url:
+        raise HTTPException(status_code=400, detail='Encoder service URL is not configured')
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(f'{base_url}/v1/models/{model_path}/rollback')
             response.raise_for_status()
             return response.json()
     except httpx.HTTPStatusError as exc:
@@ -242,6 +354,9 @@ class FeedbackTrainForm(BaseModel):
     epochs: int = 4
     activate: bool = True
     quantize: bool = False
+    # PERF-UI-03: эталонная выборка против катастрофического забывания
+    anchor_examples: Optional[list[dict[str, str]]] = None
+    use_anchor: bool = False  # собрать anchors из ранее подтвержденных фраз (status=trained)
 
 
 @router.get('/feedback')
@@ -321,6 +436,19 @@ async def train_from_feedback(
         'quantize': form.quantize,
         'examples': examples,
     }
+    # PERF-UI-03: защита от катастрофического забывания — anchors из
+    # ранее дообученных и подтвержденных фраз этого же бота
+    if form.anchor_examples:
+        payload['anchor_examples'] = form.anchor_examples
+    elif form.use_anchor:
+        trained_rows = await IntentFeedbacks.get_feedback(status='trained', bot_model_id=form.bot_model_id, limit=500)
+        anchors = [
+            {'text': row.text, 'label': row.labeled_intent}
+            for row in trained_rows
+            if row.labeled_intent
+        ]
+        if anchors:
+            payload['anchor_examples'] = anchors
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(f'{base_url}/v1/train', json=payload)
@@ -415,30 +543,38 @@ async def agent_copilot(
 ):
     """Real-Time Agent Assist: карточки знаний по текущей реплике разговора.
 
-    Только ретривер (HippoRAG + гибрид), без вызова LLM — ответ за десятки мс.
+    PERF-CORE-08: трехконтурный поиск (Dense + BM25 + HippoRAG) с Reasoning Path
+    и fusion_score. Без вызова LLM — ответ за десятки мс.
     """
-    from open_webui.retrieval.hybrid_fusion import _result_to_docs
-    from open_webui.retrieval.utils import query_collection
+    from open_webui.retrieval.hipporag_engine import get_hipporag_adapter
+    from open_webui.retrieval.hybrid_fusion import _result_to_docs, query_collection_with_graph_fusion
 
     collection_names = form.collection_ids
     if not collection_names:
         raise HTTPException(status_code=400, detail='collection_ids is required')
 
     embedding_function = request.app.state.EMBEDDING_FUNCTION
-    results = await query_collection(
+    results = await query_collection_with_graph_fusion(
         request,
         collection_names=collection_names,
         queries=[form.query],
         embedding_function=embedding_function,
         k=form.top_k,
         user=user,
+        use_hipporag=True,
     )
-    docs = _result_to_docs(results, 'dense+bm25')[: form.top_k]
+    docs = _result_to_docs(results, '3way_hybrid')[: form.top_k]
+    try:
+        reasoning = await get_hipporag_adapter().get_reasoning_path(request, collection_names[0], form.query)
+    except Exception:  # noqa: BLE001 — граф не должен ломать подсказки
+        reasoning = None
     return {
         'query': form.query,
+        'reasoning_path': reasoning,
         'cards': [
             {
                 'text': doc['text'],
+                'score': doc.get('score', 0.0),
                 'metadata': doc['metadata'],
             }
             for doc in docs

@@ -248,6 +248,51 @@ async def _set_call_transfer(call_uuid: str, queue: str) -> None:
     mark_transfer(call_uuid, queue)
 
 
+async def _pipeline_analyze(text: str, settings: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """PERF-CORE-01: единый вызов POST /v1/pipeline-analyze — Guard + Intent + Slots
+    за один сетевой RTT. При недоступности нового эндпоинта (404) — фоллбэк на
+    раздельные вызовы /v1/guard, /v1/classify, /v1/extract-slots.
+    Возвращает {'guard', 'classification', 'slots_dict'} либо None."""
+    if not settings['enable'] or not settings['url']:
+        return None
+    from open_webui.utils.http_pool import get_http_client
+
+    client = get_http_client()
+    payload = {
+        'text': text,
+        'model_id': settings['model_id'],
+        'slot_model_id': settings.get('slot_model_id') or '',
+        'tau_high': settings['tau_high'],
+        'tau_low': settings['tau_low'],
+        'check_guard': bool(settings.get('prompt_guard', True)),
+        'guard_threshold': float(settings.get('injection_threshold', 0.75)),
+    }
+    try:
+        response = await client.post(
+            f"{settings['url']}/v1/pipeline-analyze",
+            json=payload,
+            timeout=settings['timeout'] + 0.6,
+        )
+        if response.status_code == 404:
+            # Обратная совместимость с сервисом без /v1/pipeline-analyze
+            guard = await check_prompt_guard(text, settings)
+            verdict = await _classify(text, settings)
+            slots = (
+                await _extract_slots(text, settings, settings['slot_model_id'])
+                if settings.get('slot_model_id')
+                else {}
+            )
+            return {'guard': guard, 'classification': verdict, 'slots_dict': slots}
+        response.raise_for_status()
+        data = response.json()
+        spans = data.get('slots') or []
+        data['slots_dict'] = slots_from_spans(spans)
+        return data
+    except Exception as exc:  # noqa: BLE001
+        log.warning('Pipeline analyze unavailable: %s', exc)
+        return None
+
+
 async def _call_webhook(webhook_config: dict[str, Any], variables: dict[str, Any]) -> Optional[str]:
     """Безопасный вызов внешнего REST-бэкенда с защитой от SSRF и JSON-инъекций (SEC-02, SEC-06)."""
     from open_webui.utils.http_pool import get_http_client
@@ -402,14 +447,20 @@ async def apply_intent_routing(request, form_data: dict, metadata: dict, user, m
         active_state = None
         metadata['slot_filling_cancelled'] = True
 
+    # PERF-CORE-01: guard + классификация + слоты за один сетевой RTT
+    pipeline = await _pipeline_analyze(user_message, settings)
+    if not pipeline:
+        return
+    pipeline_slots: dict[str, str] = dict(pipeline.get('slots_dict') or {})
+
     # Ф5: guardrails — отсев джейлбрейков и промпт-инъекций
-    guard = await check_prompt_guard(user_message, settings)
+    guard = pipeline.get('guard')
     if guard and guard.get('injection'):
         metadata['prompt_guard'] = guard
         metadata['direct_response'] = {'content': settings['refusal_response'], 'intent': '__guard__'}
         return
 
-    verdict = await _classify(user_message, settings)
+    verdict = pipeline.get('classification')
     if not verdict:
         return
 
@@ -429,6 +480,14 @@ async def apply_intent_routing(request, form_data: dict, metadata: dict, user, m
             _replace_last_user_message(form_data, masked_message)
             metadata['pii_vault_session'] = session_key
             user_message = masked_message
+            # PERF-CORE-04: снимок вольта дублируется в Redis (шифрованный L2)
+            from open_webui.utils.pii_vault import persist_vault
+
+            asyncio.create_task(persist_vault(session_key, vault))
+        # Слоты извлечены из сырого текста — маскируем значения перед хранением
+        # и отправкой во внешние действия (тот же вольт сессии)
+        if pipeline_slots:
+            pipeline_slots = {k: vault.mask(str(v)) for k, v in pipeline_slots.items()}
 
     if action != 'direct':
         # Д2: серая зона — активная дизамбигуация, если лидеры различимы слабо
@@ -485,9 +544,7 @@ async def apply_intent_routing(request, form_data: dict, metadata: dict, user, m
 
     # Ф7: эскалация на оператора
     if rule.action_type == 'HUMAN_HANDOFF':
-        collected = {}
-        if settings['slot_model_id']:
-            collected = await _extract_slots(user_message, settings, settings['slot_model_id'])
+        collected = dict(pipeline_slots) if settings['slot_model_id'] else {}
         queue = (rule.webhook_config or {}).get('queue') or await Config.get('voice.handoff_queue')
         call_uuid = request.headers.get('x-call-uuid')
         metadata['human_handoff'] = {
@@ -552,7 +609,8 @@ async def apply_intent_routing(request, form_data: dict, metadata: dict, user, m
 
     if needs_slots:
         session = active_state or {'rule_id': rule.id, 'slots': {}, 'retries': 0}
-        new_slots = await _extract_slots(user_message, settings, settings['slot_model_id'])
+        # PERF-CORE-01: слоты уже извлечены единым вызовом pipeline-analyze
+        new_slots = pipeline_slots
         collected = _merge_rule_slots(session, rule, new_slots)
         missing = _missing_required_slots(rule, collected)
         if missing:
@@ -614,11 +672,8 @@ async def apply_intent_routing(request, form_data: dict, metadata: dict, user, m
         return
 
     if rule.action_type == 'WEBHOOK_TOOL' and rule.webhook_config:
-        webhook_slots = collected or (
-            await _extract_slots(user_message, settings, settings['slot_model_id'])
-            if settings['slot_model_id']
-            else {}
-        )
+        # PERF-CORE-01: слоты из единого pipeline-вызова
+        webhook_slots = collected or pipeline_slots
         answer = await _call_webhook(
             rule.webhook_config,
             {**extra, 'slots': json.dumps(webhook_slots, ensure_ascii=False)},
@@ -675,11 +730,25 @@ async def apply_intent_routing(request, form_data: dict, metadata: dict, user, m
 
 
 async def _enqueue_active_learning(bot_model_id: str, text: str, candidates: list[dict[str, Any]]) -> None:
-    """Ф1: серая зона -> intent_feedback с LLM-подсказкой (если настроена)."""
+    """Ф1 + PERF-CORE-05: серая зона -> intent_feedback с дедупликацией.
+
+    Повторная частая фраза не плодит дубликаты: увеличивается счетчик
+    meta['hit_count'], очередь разметки сортируется по частоте."""
     try:
         if not await Config.get('active_learning.enable'):
             return
         from open_webui.models.intents import IntentFeedbacks
+
+        normalized = text.strip().lower()
+        existing_pending = await IntentFeedbacks.get_feedback(
+            status='pending', bot_model_id=bot_model_id, limit=200
+        )
+        for item in existing_pending:
+            if item.text.strip().lower() == normalized:
+                meta = dict(item.meta or {})
+                meta['hit_count'] = int(meta.get('hit_count', 1)) + 1
+                await IntentFeedbacks.update_feedback_by_id(item.id, {'meta': meta})
+                return
 
         hint_intent, hint_confidence = await _llm_hint(text)
         await IntentFeedbacks.insert_new_feedback(
@@ -693,6 +762,7 @@ async def _enqueue_active_learning(bot_model_id: str, text: str, candidates: lis
                 'hint_confidence': hint_confidence,
                 'source': 'gray_zone',
                 'status': 'pending',
+                'meta': {'hit_count': 1},
             }
         )
     except Exception as exc:  # noqa: BLE001

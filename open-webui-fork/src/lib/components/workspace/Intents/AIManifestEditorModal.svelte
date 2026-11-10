@@ -112,6 +112,38 @@
 		}
 	};
 
+	// PERF-UI-04: 1-Click Auto-Fix — патч JSON манифеста по коду ошибки линтера
+	const AUTO_FIXABLE = ['INVALID_THRESHOLDS', 'UNDECLARED_SLOT_IN_TEMPLATE'];
+	const canAutoFix = (item: any) => AUTO_FIXABLE.includes(item?.code ?? '');
+
+	const autoFix = async (item: any) => {
+		try {
+			const manifest = JSON.parse(manifestText);
+			const routes: any[] = manifest.intent_routes ?? [];
+			const route = routes.find((r) => (r.intent_name ?? '') === (item.route ?? ''));
+			if (!route) throw 'Правило не найдено в манифесте';
+
+			if (item.code === 'INVALID_THRESHOLDS') {
+				route.tau_low = 0.5;
+				route.min_confidence = 0.85;
+			} else if (item.code === 'UNDECLARED_SLOT_IN_TEMPLATE') {
+				const match = /slots\.([a-zA-Z0-9_]+)/.exec(item.message ?? '');
+				const slotName = match?.[1];
+				if (!slotName) throw 'Не удалось распознать имя слота';
+				route.required_slots = [
+					...(route.required_slots ?? []),
+					{ name: slotName, pattern: null, question: `Уточните ${slotName}?` }
+				];
+			}
+
+			manifestText = JSON.stringify(manifest, null, 2);
+			toast.success(`Патч применен: ${item.code} — проверьте результат`);
+			await validate();
+		} catch (e) {
+			toast.error(`Auto-Fix не удался: ${e}`);
+		}
+	};
+
 	const codeClass =
 		'h-64 w-full rounded-lg border border-gray-100 bg-gray-950 px-3 py-2 font-mono text-xs text-green-100 outline-none dark:border-gray-850';
 </script>
@@ -168,12 +200,32 @@
 					<div class="mt-1 text-red-500">
 						[{item.code}] {item.message}
 						<div class="text-gray-500">→ {item.agent_remediation_hint}</div>
+						{#if canAutoFix(item)}
+							<button
+								type="button"
+								class="mt-1 inline-flex items-center gap-1 rounded-md border border-[var(--syn-cobalt)] px-2 py-0.5 text-[0.68rem] font-medium text-[var(--syn-cobalt)] hover:bg-[var(--syn-block-cobalt)] transition"
+								on:click={() => autoFix(item)}
+							>
+								<SynIcon name="spark" size={11} />
+								Исправить автоматически
+							</button>
+						{/if}
 					</div>
 				{/each}
 				{#each validation.warnings ?? [] as item}
 					<div class="mt-1 text-amber-600">
 						[{item.code}] {item.message}
 						<div class="text-gray-500">→ {item.agent_remediation_hint}</div>
+						{#if canAutoFix(item)}
+							<button
+								type="button"
+								class="mt-1 inline-flex items-center gap-1 rounded-md border border-[var(--syn-amber)] px-2 py-0.5 text-[0.68rem] font-medium text-[var(--syn-amber)] hover:bg-[var(--syn-block-amber)] transition"
+								on:click={() => autoFix(item)}
+							>
+								<SynIcon name="spark" size={11} />
+								Исправить автоматически
+							</button>
+						{/if}
 					</div>
 				{/each}
 			</div>

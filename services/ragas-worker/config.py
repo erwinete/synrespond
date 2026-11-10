@@ -1,13 +1,26 @@
 """Конфигурация ragas-worker из переменных окружения."""
 
 import os
+import re
+from pathlib import Path
 
 
 def _db_url() -> str:
-    url = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@postgres:5432/openwebui')
+    url = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@postgres:5432/openwebui').strip()
     # Д4 (Stage 5): sqlite-фоллбэк для локального стенда без Postgres
-    if url.startswith('sqlite://'):
-        url = url.replace('sqlite://', 'sqlite+aiosqlite://', 1)
+    if url.startswith('sqlite'):
+        # PERF-OPS-01: авто-исправление путей Git Bash вида
+        # sqlite:////f/Z/... -> sqlite+aiosqlite:///F:/Z/...
+        url = re.sub(
+            r'^sqlite(\+aiosqlite)?:////([a-zA-Z])/',
+            lambda m: f"sqlite+aiosqlite:///{m.group(2).upper()}:/",
+            url,
+        )
+        if url.startswith('sqlite://') and not url.startswith('sqlite+aiosqlite://'):
+            url = url.replace('sqlite://', 'sqlite+aiosqlite://', 1)
+        raw_path = url.split('sqlite+aiosqlite:///', 1)[-1]
+        if raw_path and raw_path != ':memory:':
+            Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
         return url
     # SQLAlchemy async-драйверу нужен явный dialect
     if url.startswith('postgresql://'):

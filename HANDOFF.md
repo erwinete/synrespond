@@ -30,6 +30,7 @@ Self-hosted корпоративная платформа текстовых и 
 | 4 | `stage_4_*.md` | Модульность каналов, MCP двусторонний, AI-Ready |
 | 5 | `stage_5_*.md` | Zero Technical Debt: единый RRF, aiortc SDP, семантическая прокси, local judge, 22/22 E2E |
 | 6 | `synrespond_master_tz (1).md` | Рефакторинг: SEC-01..06, BUG-01..09, http_pool, батч-NER, дизайн-система synrespond, 145 юнит + 22 E2E |
+| 7 | `synrespond_perfection_master_tz.md` | Production Perfection: 18 задач PERF-OPS/CORE/UI (см. ниже), 157 юнит + 12 новых + 22 E2E |
 
 Отчеты: `docs/WORK_REPORT.md` (этапы 1–5), `docs/STAGE4_REPORT.md` (этап 4 подробно).
 
@@ -64,10 +65,34 @@ Self-hosted корпоративная платформа текстовых и 
   библиотек и системных эмодзи — проверяет `scripts/verify_custom_ui_and_security.py`.
 - Новые env: `MCP_STDIO_ALLOWLIST`, `OUTBOUND_ALLOWED_HOSTS`, `ALLOW_LOCALHOST_WEBHOOKS`,
   `VOICE_BRIDGE_SECRET`, `OPEN_WEBUI_INTERNAL_URL` (см. `.env.example`).
-- Запуск стенда: `scripts/run_local_ui.sh` под Git Bash подменяет `$ROOT` на
-  POSIX-путь `/f/...` — ragas-worker не открывает `sqlite:////f/...`. Сервисы
-  :8002/:8765 при таком запуске поднимайте вручную с Windows-путями
-  (`sqlite:///F:/Z/...`), либо запускайте скрипт из WSL.
+### Этап 7 (Production Perfection) — ключевые изменения
+
+- Операционка: `run_local_ui.sh` кроссплатформенный (`cygpath -m`, 4 сервиса,
+  чистый trap, автосидером); `ragas-worker/config.py` конвертирует MSYS-пути
+  `sqlite:////f/...` и создает каталог БД; `scripts/seed_platform.py` идемпотентно
+  создает админа, 4 ONNX-энкодера из label_map.json и стартовый Golden Dataset;
+  `engines` Node `<=24` + `.npmrc` (engine-strict=false) — сборка без `--force`.
+- Ядро: `apply_intent_routing` и inlet ходят одним вызовом
+  `POST /v1/pipeline-analyze` (фоллбэк на раздельные эндпоинты); `test_encoder`
+  маршрутизирует все 4 задачи (classify / extract-slots / zero-shot / embeddings);
+  Fernet в CRUD харнесов, маска `•` не затирает токен; PiiVault получил L2-синхронизацию
+  через Redis с Fernet-шифрованием значений (`persist_vault`/`restore_vault`);
+  Active Learning дедуплицирует фразы с `meta['hit_count']`; Echo Guard
+  (`VAD_PLAYBACK_MULTIPLIER=1.8`, onset 180 мс при озвучке) в ядре и мосте,
+  очистка исходящей очереди при barge-in; copilot работает через графовый fusion
+  с reasoning_path; training сохраняет `_prev`-версию модели, историю задач
+  в `.train_jobs/*.status.json` и имеет `POST /v1/models/{id}/rollback`;
+  ragas-worker — WAL/busy_timeout, DLQ `ragas:live_dlq` и метрики очередей в /health.
+- UI: `LivePipelineSimulatorBar` (живой тест конвейера в студии), `AgentCopilotPanel`
+  (вкладка «Суфлер оператора»), `EncoderRegistry` (тесты всех 4 задач, reload/rollback),
+  `ActiveLearningQueue` (хоткеи 1..3/Enter/Backspace, бейдж ×N, Anchor Dataset,
+  индикатор Rollback Gate), `HippoRAGGraphViewer` (zoom/pan/фильтр/поиск/инспектор
+  узла), `Ragas` (SVG-кольца метрик), `RagasAlerts` («+ В эталонный датасет»),
+  Auto-Fix кнопки в редакторе манифеста.
+
+- Запуск стенда: `bash scripts/run_local_ui.sh` поднимает все 4 сервиса
+  (:8001, :8002, :8765, :8080) в Git Bash, WSL и Linux; пути нормализуются
+  автоматически (PERF-OPS-01), админ и энкодеры создаются сидером (PERF-OPS-02).
 
 ## 3. Архитектура — ключевые файлы
 
@@ -159,13 +184,13 @@ curl http://127.0.0.1:8765/health   # {"status":"ok"}
 
 ```bash
 cd F:/Z/chatbot/enterprise-ai-platform
-.venv-encoder/Scripts/python -m pytest tests/ -q           # 145 юнит
+.venv-encoder/Scripts/python -m pytest tests/ -q           # 157 юнит
 .venv-encoder/Scripts/python -m pytest tests/e2e_platform_verify.py -v  # E2E
 ```
 
 | Набор | Кол-во | Статус |
 |---|---|---|
-| Юнит: все файлы в tests/ | 145 | 145 passed (включая test_master_tz_refactor.py — 43) |
+| Юнит: все файлы в tests/ | 157 | 157 passed (43 из master-TZ + 12 из Perfection) |
 | E2E (20 + 2 Stage 5) | 22 | **22 passed, 0 failed, 0 skipped** при E2E_STRICT=true на живом стенде |
 
 Переменные для E2E: `E2E_API_TOKEN` (Bearer токен админа), `E2E_NLI_MODEL=rubert-nli-v1`, `E2E_SLOT_MODEL=rubert-slots-v1`, `E2E_RAGAS_URL=http://localhost:8002`, `E2E_STRICT=true`.
@@ -232,7 +257,7 @@ enterprise-ai-platform/
 │   └── voice-sip-bridge/    # Телефония (server.py, session.py, speech.py, vad.py, audiosocket.py, emotion.py, call_status.py)
 ├── pipelines-custom/        # intent_router_inlet.py
 ├── models/encoders/         # 4 ONNX-модели (rubert-intents-v1, rubert-nli-v1, rubert-slots-v1, rubert-embed-v1)
-├── tests/                   # 145 юнит + 22 E2E + QA_PIPELINE.md
+├── tests/                   # 157 юнит + 22 E2E + QA_PIPELINE.md
 ├── scripts/                 # run_local_ui.sh, bootstrap_models.py
 ├── deploy/DEPLOYMENT.md     # 16 разделов
 ├── docs/                    # WORK_REPORT.md, STAGE4_REPORT.md

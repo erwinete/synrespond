@@ -46,6 +46,7 @@ class CallSession:
         send_audio: Callable[[bytes], Any],
         on_status: Optional[Callable[[str], Any]] = None,
         call_uuid: Optional[str] = None,
+        clear_outbound: Optional[Callable[[], Any]] = None,
     ):
         self.session_id = session_id
         self.call_uuid = call_uuid
@@ -53,6 +54,8 @@ class CallSession:
         self.out_sample_rate = out_sample_rate
         self._send_audio = send_audio
         self._on_status = on_status
+        # PERF-CORE-07: мгновенная очистка исходящей очереди фреймов при barge-in
+        self._clear_outbound = clear_outbound
         self.segmenter = UtteranceSegmenter()
         self.history: list[dict[str, str]] = []
         self._tts_task: asyncio.Task | None = None
@@ -75,7 +78,7 @@ class CallSession:
             BARGE_IN_ENABLED
             and self._tts_task
             and not self._tts_task.done()
-            and self.segmenter.has_active_speech_onset()
+            and self.segmenter.has_barge_in_onset()
         ):
             log.info('Barge-in onset: речь абонента прерывает озвучку (%s)', self.session_id)
             self._cancel_tts()
@@ -96,6 +99,13 @@ class CallSession:
         if BARGE_IN_ENABLED and self._tts_task and not self._tts_task.done():
             self._tts_task.cancel()
             log.info('Barge-in: отмена воспроизведения (%s)', self.session_id)
+        if self._clear_outbound:
+            try:
+                result = self._clear_outbound()
+                if asyncio.iscoroutine(result):
+                    asyncio.create_task(result)
+            except Exception:  # noqa: BLE001
+                pass
         self._barge_in = False
 
     def _status(self, message: str) -> None:
@@ -148,6 +158,8 @@ class CallSession:
         """Стримим ответ бота и синтезируем аудио по предложениям."""
         self._tts_task = asyncio.current_task()
         self._first_audio_sent = False
+        # PERF-CORE-07: во время озвучки включается эхо-защита VAD
+        self.segmenter.playback_active = True
         answer_parts: list[str] = []
         filler_task = asyncio.create_task(self._play_filler_if_silent())
 
@@ -194,6 +206,7 @@ class CallSession:
                 self.history = self.history[-12:]
         finally:
             filler_task.cancel()
+            self.segmenter.playback_active = False
 
     async def _play_filler_if_silent(self) -> None:
         """Д3: через FILLER_DELAY_MS маскируем задержку коротким филлером.

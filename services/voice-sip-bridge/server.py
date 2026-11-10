@@ -40,7 +40,12 @@ app = FastAPI(title='Voice SIP Bridge (Pipecat-based)', version=VERSION)
 
 
 def make_session(
-    session_id: str, in_rate: int, out_rate: int, send_audio, call_uuid: str | None = None
+    session_id: str,
+    in_rate: int,
+    out_rate: int,
+    send_audio,
+    call_uuid: str | None = None,
+    clear_outbound=None,
 ) -> CallSession:
     return CallSession(
         session_id=session_id,
@@ -48,6 +53,7 @@ def make_session(
         out_sample_rate=out_rate,
         send_audio=send_audio,
         call_uuid=call_uuid,
+        clear_outbound=clear_outbound,
     )
 
 
@@ -91,11 +97,20 @@ async def ws_audio(websocket: WebSocket, sample_rate: int = Query(default=8000))
     session_id = f'ws-{id(websocket)}'
     log.info('WS-сессия %s, sample_rate=%s', session_id, sample_rate)
 
+    pending_sends: set[asyncio.Task] = set()
+
     def send_audio(pcm: bytes) -> None:
         if websocket.client_state.name == 'CONNECTED':
-            asyncio.create_task(websocket.send_bytes(pcm))
+            task = asyncio.create_task(websocket.send_bytes(pcm))
+            pending_sends.add(task)
+            task.add_done_callback(pending_sends.discard)
 
-    session = make_session(session_id, sample_rate, sample_rate, send_audio)
+    def clear_outbound() -> None:
+        """PERF-CORE-07: сброс еще не отправленных WS-кадров при barge-in."""
+        for task in list(pending_sends):
+            task.cancel()
+
+    session = make_session(session_id, sample_rate, sample_rate, send_audio, clear_outbound=clear_outbound)
     try:
         while True:
             frame = await websocket.receive_bytes()
@@ -111,8 +126,8 @@ async def ws_audio(websocket: WebSocket, sample_rate: int = Query(default=8000))
 
 @app.on_event('startup')
 async def startup():
-    async def audiosocket_session_factory(session_id: str, send_audio, call_uuid: str | None = None) -> CallSession:
-        return make_session(session_id, 8000, 8000, send_audio, call_uuid=call_uuid)
+    async def audiosocket_session_factory(session_id: str, send_audio, call_uuid: str | None = None, clear_outbound=None) -> CallSession:
+        return make_session(session_id, 8000, 8000, send_audio, call_uuid=call_uuid, clear_outbound=clear_outbound)
 
     server = await start_audiosocket_server(audiosocket_session_factory)
     app.state.audiosocket_server = server

@@ -48,6 +48,7 @@ async def handle_audiosocket_connection(
     log.info('AudioSocket звонок %s от %s', call_uuid, peer)
 
     loop = asyncio.get_running_loop()
+    pending_writes: set[asyncio.Task] = set()
 
     def send_audio(pcm: bytes) -> None:
         if writer.is_closing():
@@ -55,9 +56,16 @@ async def handle_audiosocket_connection(
         for offset in range(0, len(pcm), MAX_FRAME):
             chunk = pcm[offset : offset + MAX_FRAME]
             frame = bytes([TYPE_AUDIO]) + len(chunk).to_bytes(2, 'big') + chunk
-            loop.create_task(_write(writer, frame))
+            task = loop.create_task(_write(writer, frame))
+            pending_writes.add(task)
+            task.add_done_callback(pending_writes.discard)
 
-    session = session_factory(call_uuid, send_audio, call_uuid=call_uuid)
+    def clear_outbound() -> None:
+        """PERF-CORE-07: мгновенный сброс еще не записанных аудио-кадров."""
+        for task in list(pending_writes):
+            task.cancel()
+
+    session = session_factory(call_uuid, send_audio, call_uuid=call_uuid, clear_outbound=clear_outbound)
 
     hangup = False
     try:

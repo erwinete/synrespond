@@ -116,6 +116,12 @@ def start_train_job(registry, models_dir: str, params: dict[str, Any]) -> str:
                         if m
                     ]
             _futures.pop(job_id, None)
+        # PERF-CORE-09: финальный статус задачи переживает рестарт процесса
+        try:
+            with open(os.path.join(_jobs_dir, f'{job_id}.status.json'), 'w', encoding='utf-8') as f:
+                json.dump({k: job.get(k) for k in ('job_id', 'status', 'created_at', 'params', 'result', 'error')}, f, ensure_ascii=False, default=str)
+        except OSError:
+            pass
         for model_id in reload_ids:
             try:
                 registry.reload(model_id)
@@ -257,11 +263,13 @@ def _train_and_export(
             }
 
     if activate:
-        # Атомарная подмена каталога модели на диске
+        # PERF-CORE-09: предыдущая стабильная версия сохраняется в {final_dir}_prev
+        # для 1-клик отката вместо немедленного удаления
         if os.path.exists(final_dir):
-            old_dir = f'{final_dir}_old_{uuid.uuid4().hex[:6]}'
-            os.replace(final_dir, old_dir)
-            shutil.rmtree(old_dir, ignore_errors=True)
+            prev_dir = f'{final_dir}_prev'
+            if os.path.exists(prev_dir):
+                shutil.rmtree(prev_dir, ignore_errors=True)
+            os.replace(final_dir, prev_dir)
         os.replace(tmp_dir, final_dir)
         swapped = True
     else:

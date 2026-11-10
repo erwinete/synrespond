@@ -49,6 +49,10 @@ VAD_START_MS = 100
 VAD_END_MS = 500
 VAD_MAX_MS = 15000
 ENERGY_THRESHOLD = 500.0
+# PERF-CORE-07 (Duplex Echo Guard): пока играет TTS, порог энергии повышается,
+# а barge-in требует устойчивой речи, чтобы эхо бота не вызывало самопрерывание
+VAD_PLAYBACK_MULTIPLIER = float(os.getenv('VAD_PLAYBACK_MULTIPLIER', '1.8'))
+VAD_BARGE_IN_MIN_MS = int(os.getenv('VAD_BARGE_IN_MIN_MS', '180'))
 
 
 def _rms(payload: bytes) -> float:
@@ -67,11 +71,17 @@ class _Segmenter:
         self.speaking = False
         self.last_voice = 0.0
         self.started = 0.0
+        # PERF-CORE-07: флаг активного воспроизведения TTS (эхо-защита)
+        self.playback_active = False
 
     def feed(self, pcm: bytes) -> bytes | None:
         now = time.monotonic()
         self.buffer += pcm
-        if _rms(pcm) >= ENERGY_THRESHOLD:
+        # Эхо-защита: во время озвучки порог энергии повышается
+        effective_threshold = (
+            ENERGY_THRESHOLD * VAD_PLAYBACK_MULTIPLIER if self.playback_active else ENERGY_THRESHOLD
+        )
+        if _rms(pcm) >= effective_threshold:
             self.last_voice = now
             if not self.speaking:
                 self.speaking = True
@@ -85,8 +95,13 @@ class _Segmenter:
         return None
 
     def has_active_speech_onset(self) -> bool:
-        """True — речь активна дольше VAD_ONSET_MS (триггер мгновенного barge-in)."""
-        return self.speaking and (time.monotonic() - self.started) * 1000 >= VAD_ONSET_MS
+        """True — речь активна дольше порога onset (триггер мгновенного barge-in).
+
+        При активной озвучке требуется VAD_BARGE_IN_MIN_MS устойчивой речи."""
+        if not self.speaking:
+            return False
+        min_ms = VAD_BARGE_IN_MIN_MS if self.playback_active else VAD_ONSET_MS
+        return (time.monotonic() - self.started) * 1000 >= min_ms
 
     def flush(self) -> bytes | None:
         segment, self.buffer = self.buffer, b''
@@ -387,7 +402,9 @@ async def _handle_aiortc_offer(sdp: str, internal_token: str = '') -> str:
                 data = np.clip(arr, -32768, 32767).astype(np.int16).tobytes()
                 segmenter.feed(data)
                 # BUG-07.3: мгновенный barge-in по onset речи — активный ход
-                # отменяется, исходящая очередь аудио сбрасывается
+                # отменяется, исходящая очередь аудио сбрасывается;
+                # PERF-CORE-07: эхо-защита при активной озвучке
+                segmenter.playback_active = turn_task is not None and not turn_task.done()
                 if segmenter.has_active_speech_onset() and turn_task is not None and not turn_task.done():
                     if not barge_in_fired:
                         send_event({'type': 'barge_in_clear'})
@@ -549,7 +566,9 @@ async def webrtc_stream(websocket: WebSocket):
             if not data:
                 continue
 
-            # BUG-07.3: onset речи мгновенно прерывает озвучку бота
+            # BUG-07.3: onset речи мгновенно прерывает озвучку бота;
+            # PERF-CORE-07: пока идет озвучка — эхо-защита VAD
+            segmenter.playback_active = response_task is not None and not response_task.done()
             segmenter.feed(data)
             if (
                 segmenter.has_active_speech_onset()

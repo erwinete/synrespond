@@ -56,6 +56,19 @@ ragas_sample = Table(
 engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
 SessionFactory = async_sessionmaker(engine, expire_on_commit=False)
 
+if DATABASE_URL.startswith('sqlite'):
+    # PERF-CORE-06: WAL и busy_timeout — конкурентная запись live-сэмплов
+    # не блокирует батч-прогоны, а рестарт воркера не портит базу
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, 'connect')
+    def _set_sqlite_pragma(dbapi_conn, _connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute('PRAGMA journal_mode=WAL;')
+        cursor.execute('PRAGMA synchronous=NORMAL;')
+        cursor.execute('PRAGMA busy_timeout=10000;')
+        cursor.close()
+
 
 async def init_db_if_sqlite() -> None:
     """Д4 (Stage 5): для локального sqlite создаем таблицы при старте.

@@ -386,6 +386,9 @@ class MCPHarnessesTable:
             return MCPHarnessModel.model_validate(row) if row else None
 
     async def insert_new_harness(self, form: dict[str, Any], db: AsyncSession | None = None) -> MCPHarnessModel:
+        # PERF-CORE-03: секрет хранится только в зашифрованном виде (Fernet, 8.1)
+        from open_webui.utils.security_guard import encrypt_secret
+
         async with get_async_db_context(db) as db:
             now = int(time.time())
             record = MCPHarness(
@@ -393,7 +396,7 @@ class MCPHarnessesTable:
                 created_at=now,
                 updated_at=now,
                 **{
-                    k: v
+                    k: (encrypt_secret(v) if k == 'auth_token' else v)
                     for k, v in form.items()
                     if k in (
                         'name', 'description_for_agents', 'transport', 'endpoint_or_cmd',
@@ -408,11 +411,19 @@ class MCPHarnessesTable:
     async def update_harness_by_id(
         self, id: str, fields: dict[str, Any], db: AsyncSession | None = None
     ) -> Optional[MCPHarnessModel]:
+        # PERF-CORE-03: пустое или замаскированное значение не затирает
+        # реальный токен; новое значение шифруется перед записью
+        from open_webui.utils.security_guard import encrypt_secret
+
         async with get_async_db_context(db) as db:
             row = await db.get(MCPHarness, id)
             if not row:
                 return None
             for key, value in fields.items():
+                if key == 'auth_token':
+                    if not value or (isinstance(value, str) and '•' in value):
+                        continue  # маска или пусто — токен не трогаем
+                    value = encrypt_secret(value)
                 if hasattr(row, key) and key not in ('id', 'created_at'):
                     setattr(row, key, value)
             row.updated_at = int(time.time())

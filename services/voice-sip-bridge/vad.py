@@ -14,8 +14,10 @@ import time
 from config import (
     ENERGY_THRESHOLD,
     INTERNAL_SAMPLE_RATE,
+    VAD_BARGE_IN_MIN_MS,
     VAD_END_MS,
     VAD_MAX_SEGMENT_MS,
+    VAD_PLAYBACK_MULTIPLIER,
     VAD_START_MS,
 )
 
@@ -57,7 +59,9 @@ class UtteranceSegmenter:
         self.last_voice_ts = 0.0
         self.speech_started_ts = 0.0
         self._silero = _make_silero()
-        self._residual = b''
+        self._residual = b''  # noqa: B906
+        # PERF-CORE-07: флаг активного воспроизведения TTS (эхо-защита)
+        self.playback_active = False
 
     def feed(self, pcm: bytes, sample_rate: int) -> bytes | None:
         now = time.monotonic()
@@ -95,15 +99,34 @@ class UtteranceSegmenter:
 
         BUG-07: прерывание не ждет конца всей фразы абонента и тишины VAD_END_MS.
         """
-        return self.speaking and (time.monotonic() - self.speech_started_ts) * 1000 >= VAD_START_MS
+        return self.has_barge_in_onset()
+
+    def has_barge_in_onset(self) -> bool:
+        """True — абонент уверенно говорит поверх TTS (PERF-CORE-07).
+
+        Пока играет озвучка (playback_active), требуем VAD_BARGE_IN_MIN_MS
+        устойчивой речи вместо VAD_START_MS, чтобы телефонное/акустическое
+        эхо собственного голоса бота не вызывало самопрерывание.
+        """
+        if not self.speaking:
+            return False
+        min_ms = VAD_BARGE_IN_MIN_MS if self.playback_active else VAD_START_MS
+        return (time.monotonic() - self.speech_started_ts) * 1000 >= min_ms
 
     def _flush(self) -> bytes:
         segment, self.buffer = self.buffer, b''
         return segment
 
     def _has_voice(self, pcm: bytes, sample_rate: int) -> bool:
+        # PERF-CORE-07: во время воспроизведения TTS порог энергии повышается,
+        # чтобы тихое эхо динамика не считалось голосом абонента
+        effective_threshold = (
+            ENERGY_THRESHOLD * VAD_PLAYBACK_MULTIPLIER if self.playback_active else ENERGY_THRESHOLD
+        )
         if self._silero is None:
-            return rms(pcm) >= ENERGY_THRESHOLD
+            return rms(pcm) >= effective_threshold
+        if self.playback_active and rms(pcm) < effective_threshold:
+            return False
 
         analyzer, vad_state, np = self._silero
         # Silero требует 16 кГц и чанк 512 сэмплов (1024 байта)

@@ -29,6 +29,12 @@ VAD_END_MS = int(os.getenv('VAD_END_MS', '600'))
 VAD_MAX_SEGMENT_MS = int(os.getenv('VAD_MAX_SEGMENT_MS', '15000'))
 VAD_PREFIX_MS = int(os.getenv('VAD_PREFIX_MS', '300'))
 
+# PERF-CORE-07 (Duplex Echo Guard): пока играет TTS, микрофон слышит эхо бота.
+# Порог энергии повышается в VAD_PLAYBACK_MULTIPLIER раз, а barge-in требует
+# VAD_BARGE_IN_MIN_MS устойчивой речи вместо VAD_START_MS.
+VAD_PLAYBACK_MULTIPLIER = float(os.getenv('VAD_PLAYBACK_MULTIPLIER', '1.8'))
+VAD_BARGE_IN_MIN_MS = int(os.getenv('VAD_BARGE_IN_MIN_MS', '180'))
+
 # Barge-in: прерывать воспроизведение TTS при новой речи абонента
 BARGE_IN_ENABLED = os.getenv('VOICE_BARGE_IN', 'True').lower() == 'true'
 

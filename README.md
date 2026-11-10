@@ -10,7 +10,7 @@ HippoRAG) и непрерывный контроль качества по фр�
 
 ```text
 enterprise-ai-platform/
-├── open-webui-fork/            # Форк github.com/open-webui/open-webui (ветка feat/enterprise-platform)
+├── open-webui-fork/            # Форк github.com/open-webui/open-webui (единый монорепозиторий, ветка main)
 │   ├── backend/open_webui/
 │   │   ├── models/intents.py           # [NEW] encoder_model, intent_route
 │   │   ├── models/ragas_evals.py       # [NEW] ragas_dataset, ragas_run, ragas_sample
@@ -140,5 +140,5 @@ npm run dev
 
 ## Ветки и коммиты
 
-Изменения форка живут в ветке `feat/enterprise-platform` (`open-webui-fork/`).
-Инфраструктура и сервисы коммитятся в корневой репозиторий монорепозитория.
+Форк, сервисы и инфраструктура живут в едином монорепозитории (ветка `main`).
+Каталог `open-webui-fork/` — встроенная копия форка open-webui 0.13.0.

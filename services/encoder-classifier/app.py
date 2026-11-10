@@ -12,6 +12,7 @@
 import logging
 import os
 import time
+import uuid
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -334,6 +335,8 @@ async def pipeline_analyze(req: PipelineAnalyzeRequest) -> PipelineAnalyzeRespon
     t0 = time.perf_counter()
 
     async def _guard() -> Optional[GuardResponse]:
+        if not req.check_guard:
+            return None
         try:
             result = await detect_injection(registry, req.text, req.guard_threshold)
             return GuardResponse(**result)
@@ -406,10 +409,39 @@ async def training_status(job_id: str) -> TrainJobStatus:
 async def reload_model(model_id: str) -> ReloadResponse:
     """Горячая перезагрузка ONNX-модели без даунтайма."""
     try:
-        registry._artifacts.pop(model_id, None)  # noqa: SLF001 — управляемый сброс
-        registry.get(model_id)
+        registry.reload(model_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    return ReloadResponse(model_id=model_id, reloaded=True)
+
+
+@app.post("/v1/models/{model_id}/rollback", response_model=ReloadResponse)
+async def rollback_model(model_id: str) -> ReloadResponse:
+    """PERF-CORE-09: 1-клик откат модели к предыдущей стабильной версии.
+
+    Подменяет каталог модели на {model_id}_prev, прогревает реестр весов.
+    """
+    import shutil
+
+    if not model_id or ".." in model_id or "/" in model_id or "\\" in model_id:
+        raise HTTPException(status_code=400, detail=f"Invalid model id: {model_id!r}")
+    final_dir = os.path.join(registry.models_dir, model_id)
+    prev_dir = f"{final_dir}_prev"
+    if not os.path.isdir(prev_dir):
+        raise HTTPException(status_code=404, detail=f"No previous stable version for {model_id}")
+    trash_dir = f"{final_dir}_rollback_{uuid.uuid4().hex[:6]}"
+    # Откатная подмена: prev -> current, а откатываемая текущая -> новый prev
+    os.replace(final_dir, trash_dir)
+    try:
+        os.replace(prev_dir, final_dir)
+    except Exception:
+        os.replace(trash_dir, final_dir)  # восстановление при ошибке
+        raise
+    os.replace(trash_dir, prev_dir)
+    try:
+        registry.reload(model_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Rollback reload failed: {exc}")
     return ReloadResponse(model_id=model_id, reloaded=True)
 
 from pydantic import BaseModel as _BaseModel

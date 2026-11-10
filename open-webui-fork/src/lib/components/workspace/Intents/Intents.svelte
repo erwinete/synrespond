@@ -11,6 +11,8 @@
 	import SynIcon from '../../synrespond/SynIcon.svelte';
 	import SynEmoji from '../../synrespond/SynEmoji.svelte';
 	import ModuleSettingsDrawer from '../../synrespond/ModuleSettingsDrawer.svelte';
+	import LivePipelineSimulatorBar from '../../synrespond/LivePipelineSimulatorBar.svelte';
+	import AgentCopilotPanel from '../../synrespond/AgentCopilotPanel.svelte';
 
 	import IntentRouterTable from './IntentRouterTable.svelte';
 	import EncoderRegistry from './EncoderRegistry.svelte';
@@ -29,7 +31,7 @@
 	let ragasAlerts: any[] = [];
 	let platformSettings: Record<string, any> = {};
 
-	let selectedTab: 'matrix' | 'encoders' | 'learning' | 'channels' | 'mcp' = 'matrix';
+	let selectedTab: 'matrix' | 'encoders' | 'learning' | 'channels' | 'mcp' | 'copilot' = 'matrix';
 	let loading = true;
 	let showManifestModal = false;
 
@@ -248,6 +250,9 @@
 		</button>
 	</section>
 
+	<!-- PERF-UI-01: строка сквозного симулятора конвейера -->
+	<LivePipelineSimulatorBar />
+
 	<nav
 		class="flex flex-wrap items-center gap-1.5 rounded-xl bg-[var(--syn-bg-elevated)] p-1.5 text-xs font-medium"
 		aria-label="Разделы студии"
@@ -256,6 +261,7 @@
 			{ id: 'matrix', label: 'Матрица интентов', icon: 'matrix', badge: routes.length },
 			{ id: 'encoders', label: 'ONNX Энкодеры', icon: 'encoder', badge: encoders.length },
 			{ id: 'learning', label: 'Active Learning', icon: 'flywheel', badge: pendingFeedback.length },
+			{ id: 'copilot', label: 'Суфлер оператора', icon: 'spark', badge: knowledgeBases.length },
 			{ id: 'channels', label: 'Каналы и Тест звонка', icon: 'phone', badge: activeChannelsCount },
 			{ id: 'mcp', label: 'MCP и Харнесы', icon: 'mcp', badge: 8 }
 		] as item}
@@ -295,6 +301,8 @@
 		<EncoderRegistry {encoders} on:change={loadAll} />
 	{:else if selectedTab === 'learning'}
 		<ActiveLearningQueue {encoders} {routes} on:change={loadAll} />
+	{:else if selectedTab === 'copilot'}
+		<AgentCopilotPanel {knowledgeBases} />
 	{:else if selectedTab === 'channels'}
 		<ChannelRuntimePanel on:openSettings={() => openModuleSettings('channels')} />
 	{:else if selectedTab === 'mcp'}

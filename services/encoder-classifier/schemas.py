@@ -137,6 +137,7 @@ class PipelineAnalyzeRequest(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
     model_id: str = "rubert-intents-v1"
     slot_model_id: str = ""
+    check_guard: bool = True
     guard_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
     temperature: float = Field(default=1.0, gt=0.0)
     tau_high: Optional[float] = Field(default=None, ge=0.0, le=1.0)

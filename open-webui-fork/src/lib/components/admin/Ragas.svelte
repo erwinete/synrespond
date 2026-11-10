@@ -72,6 +72,16 @@
 		context_recall: 'Context Recall'
 	};
 
+	// PERF-UI-06: цвет кольца по значению метрики (порог галлюцинаций 0.7)
+	const gaugeColor = (value: number) =>
+		value >= 0.85 ? 'var(--syn-emerald)' : value >= 0.7 ? 'var(--syn-amber)' : 'var(--syn-coral)';
+	const gaugeMood = (value: number) => (value >= 0.85 ? 'optimized' : value >= 0.7 ? 'curious' : 'hallucination');
+	const gaugeDash = (value: number, radius: number) => {
+		const circumference = 2 * Math.PI * radius;
+		const filled = Math.max(0, Math.min(1, value)) * circumference;
+		return `${filled.toFixed(1)} ${(circumference - filled).toFixed(1)}`;
+	};
+
 	onMount(loadAll);
 </script>
 
@@ -129,10 +139,37 @@
 		<div class="flex flex-col gap-4">
 			<div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
 				{#each Object.entries(METRIC_LABELS) as [key, label]}
-					<div class="syn-color-block syn-block-amber">
-						<div class="text-xs text-[var(--syn-text-secondary)]">{label}</div>
-						<div class="mt-1 text-2xl font-semibold font-mono">
-							{summaryMetrics[key] !== undefined ? (summaryMetrics[key] * 100).toFixed(1) + '%' : '—'}
+					{@const value = summaryMetrics[key]}
+					<div class="syn-color-block syn-block-amber flex items-center gap-3">
+						{#if value !== undefined}
+							<svg width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="{label}: {(value * 100).toFixed(1)}%">
+								<circle cx="32" cy="32" r="26" fill="none" stroke="var(--syn-bg-elevated)" stroke-width="6" />
+								<circle
+									cx="32"
+									cy="32"
+									r="26"
+									fill="none"
+									stroke={gaugeColor(value)}
+									stroke-width="6"
+									stroke-linecap="round"
+									stroke-dasharray={gaugeDash(value, 26)}
+									transform="rotate(-90 32 32)"
+								/>
+								<text x="32" y="36" text-anchor="middle" font-size="13" font-weight="600" fill="var(--syn-text-primary)">
+									{(value * 100).toFixed(0)}%
+								</text>
+							</svg>
+						{:else}
+							<SynEmoji mood="sleeping" size={52} animated={false} />
+						{/if}
+						<div>
+							<div class="text-xs text-[var(--syn-text-secondary)]">{label}</div>
+							<div class="mt-0.5 flex items-center gap-1">
+								<SynEmoji mood={value !== undefined ? gaugeMood(value) : 'sleeping'} size={16} animated={false} />
+								<span class="font-mono text-[0.68rem] text-[var(--syn-text-tertiary)]">
+									{value !== undefined ? (value * 100).toFixed(1) + '%' : 'нет прогонов'}
+								</span>
+							</div>
 						</div>
 					</div>
 				{/each}

@@ -46,10 +46,13 @@ class Pipeline:
         if not text:
             return body
 
+        # PERF-CORE-01: единый вызов pipeline-analyze (guard+intent+slots за 1 RTT)
+        # с фоллбэком на раздельный /v1/classify для старых инстансов
+        verdict = None
         try:
-            async with httpx.AsyncClient(timeout=self.valves.timeout_s) as client:
+            async with httpx.AsyncClient(timeout=self.valves.timeout_s + 0.4) as client:
                 resp = await client.post(
-                    f"{self.valves.classifier_url}/v1/classify",
+                    f"{self.valves.classifier_url}/v1/pipeline-analyze",
                     json={
                         "text": text,
                         "model_id": self.valves.model_id,
@@ -57,8 +60,19 @@ class Pipeline:
                         "tau_low": self.valves.tau_low,
                     },
                 )
+                if resp.status_code == 404:
+                    resp = await client.post(
+                        f"{self.valves.classifier_url}/v1/classify",
+                        json={
+                            "text": text,
+                            "model_id": self.valves.model_id,
+                            "tau_high": self.valves.tau_high,
+                            "tau_low": self.valves.tau_low,
+                        },
+                    )
                 resp.raise_for_status()
-                verdict = resp.json()
+                data = resp.json()
+                verdict = data.get("classification") or data
         except Exception:
             # Классификатор недоступен — пропускаем запрос без маршрутизации
             return body
